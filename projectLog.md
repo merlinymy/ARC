@@ -1,0 +1,1 @@
+# An interface to help A'Lester chat about all the research papers he has collected. It's gonna be using claude (At first, then try different models, maybe self deploy one) + RAG (retreival augmented generation).

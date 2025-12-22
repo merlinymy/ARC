@@ -1,0 +1,35 @@
+# Core API Framework
+fastapi
+uvicorn[standard]
+python-multipart
+
+# AI/ML Libraries
+anthropic
+voyageai
+cohere
+
+# PDF Processing (MinerU replaces marker-pdf, pymupdf, pdfplumber, camelot-py)
+mineru[core]
+
+# Vector Database
+qdrant-client
+
+# Utilities
+python-dotenv
+pydantic
+pydantic-settings
+
+# HTTP Client
+httpx
+aiofiles
+
+# Data Processing
+numpy
+pillow
+tqdm
+tiktoken
+
+# Testing & Evaluation
+pytest
+pytest-asyncio
+pandas

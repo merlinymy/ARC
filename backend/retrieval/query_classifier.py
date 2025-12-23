@@ -5,8 +5,8 @@ Different query types benefit from different chunk types and retrieval parameter
 """
 
 import logging
-from typing import Dict, Any, Optional
-from dataclasses import dataclass
+from typing import Dict, Any, Optional, List, Tuple
+from dataclasses import dataclass, field
 from enum import Enum
 
 from anthropic import Anthropic
@@ -35,6 +35,17 @@ class QueryClassification:
     needs_cross_corpus: bool
     suggested_chunk_types: list
     suggested_top_k: int
+    reasoning: str
+
+
+@dataclass
+class MultiQueryClassification:
+    """Result of multi-label query classification (top 3 categories)."""
+    query_types: List[Tuple[QueryType, float]]  # List of (type, confidence) pairs
+    primary_type: QueryType  # Highest confidence type
+    entities: list
+    needs_cross_corpus: bool
+    merged_chunk_types: list  # Union of chunk types from all categories
     reasoning: str
 
 
@@ -161,6 +172,31 @@ CROSS_CORPUS: <true or false>
 REASONING: <brief explanation>'''
 
 
+MULTI_CLASSIFICATION_PROMPT = '''Classify this research question into the TOP 3 most relevant categories, ranked by relevance.
+
+Categories:
+- FACTUAL: Specific facts, definitions, values, mechanisms
+- FRAMING: How to position/justify research for publication
+- METHODS: Technical protocols, procedures, experimental details
+- SUMMARY: Summarize findings
+- COMPARATIVE: Compare methods/approaches across papers
+- NOVELTY: Assess prior work, gaps, what's new/defensible
+- LIMITATIONS: Constraints, caveats, weaknesses
+
+Question: {query}
+
+Return the top 3 categories that could help answer this query, even if some are secondary.
+Many queries have multiple aspects - a methods question might also need framing context.
+
+Respond in this exact format:
+TOP_1: <category> (<confidence 0.0-1.0>)
+TOP_2: <category> (<confidence 0.0-1.0>)
+TOP_3: <category> (<confidence 0.0-1.0>)
+ENTITIES: <domain entities, or "none">
+CROSS_CORPUS: <true or false>
+REASONING: <brief explanation of why these 3 categories>'''
+
+
 class QueryClassifier:
     """Classify queries to determine retrieval strategy."""
 
@@ -274,6 +310,99 @@ class QueryClassifier:
     def get_retrieval_strategy(self, query_type: QueryType) -> Dict[str, Any]:
         """Get retrieval strategy for a query type."""
         return RETRIEVAL_STRATEGIES.get(query_type, RETRIEVAL_STRATEGIES[QueryType.GENERAL])
+
+    def classify_multi(self, query: str) -> MultiQueryClassification:
+        """Classify a query into top 3 categories for broader retrieval.
+
+        Args:
+            query: User query to classify
+
+        Returns:
+            MultiQueryClassification with top 3 types and merged chunk types
+        """
+        prompt = MULTI_CLASSIFICATION_PROMPT.format(query=query)
+
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=300,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            return self._parse_multi_response(response.content[0].text, query)
+
+        except Exception as e:
+            logger.error(f"Multi-classification failed: {e}")
+            return self._default_multi_classification(query)
+
+    def _parse_multi_response(self, response: str, query: str) -> MultiQueryClassification:
+        """Parse Claude's multi-classification response."""
+        lines = response.strip().split('\n')
+
+        query_types: List[Tuple[QueryType, float]] = []
+        entities = []
+        cross_corpus = False
+        reasoning = ""
+
+        for line in lines:
+            line = line.strip()
+
+            # Parse TOP_1, TOP_2, TOP_3
+            for i in range(1, 4):
+                if line.startswith(f"TOP_{i}:"):
+                    try:
+                        content = line.split(":", 1)[1].strip()
+                        # Parse "METHODS (0.8)" format
+                        if "(" in content and ")" in content:
+                            type_str = content.split("(")[0].strip().upper()
+                            conf_str = content.split("(")[1].split(")")[0].strip()
+                            query_type = QueryType(type_str.lower())
+                            confidence = float(conf_str)
+                            query_types.append((query_type, confidence))
+                    except (ValueError, IndexError):
+                        pass
+
+            if line.startswith("ENTITIES:"):
+                entities_str = line.split(":", 1)[1].strip()
+                if entities_str.lower() != "none":
+                    entities = [e.strip() for e in entities_str.split(",")]
+
+            elif line.startswith("CROSS_CORPUS:"):
+                cross_corpus = line.split(":", 1)[1].strip().lower() == "true"
+
+            elif line.startswith("REASONING:"):
+                reasoning = line.split(":", 1)[1].strip()
+
+        # Fallback if parsing failed
+        if not query_types:
+            query_types = [(QueryType.GENERAL, 0.5)]
+
+        # Merge chunk types from all categories
+        merged_chunk_types = set()
+        for qt, _ in query_types:
+            strategy = RETRIEVAL_STRATEGIES.get(qt, RETRIEVAL_STRATEGIES[QueryType.GENERAL])
+            merged_chunk_types.update(strategy["chunk_types"])
+
+        return MultiQueryClassification(
+            query_types=query_types,
+            primary_type=query_types[0][0],
+            entities=entities,
+            needs_cross_corpus=cross_corpus,
+            merged_chunk_types=list(merged_chunk_types),
+            reasoning=reasoning,
+        )
+
+    def _default_multi_classification(self, query: str) -> MultiQueryClassification:
+        """Return default multi-classification when parsing fails."""
+        return MultiQueryClassification(
+            query_types=[(QueryType.GENERAL, 0.5)],
+            primary_type=QueryType.GENERAL,
+            entities=[],
+            needs_cross_corpus=False,
+            merged_chunk_types=RETRIEVAL_STRATEGIES[QueryType.GENERAL]["chunk_types"],
+            reasoning="Default classification due to parsing error",
+        )
 
 
 # Technical terms that signal METHODS even with "how should I describe" phrasing

@@ -18,7 +18,7 @@ from anthropic import Anthropic
 from .embedder import VoyageEmbedder
 from .reranker import CohereReranker
 from .qdrant_store import QdrantStore
-from .query_classifier import QueryClassifier, QueryType, QueryClassification, RETRIEVAL_STRATEGIES
+from .query_classifier import QueryClassifier, QueryType, QueryClassification, MultiQueryClassification, RETRIEVAL_STRATEGIES
 from .query_expander import QueryExpander
 
 logger = logging.getLogger(__name__)
@@ -194,20 +194,22 @@ class QueryEngine:
         """
         # Step 1: Classify query
         if self.enable_classification and self.classifier:
+            # Full LLM classification
             classification = self.classifier.classify(query)
             query_type = classification.query_type
         else:
-            # Default classification
+            # Hybrid approach: targeted retrieval for methods/limitations, universal for rest
+            query_type = self._detect_targeted_query_type(query)
+            strategy = RETRIEVAL_STRATEGIES[query_type]
             classification = QueryClassification(
-                query_type=QueryType.FACTUAL,
-                confidence=0.5,
+                query_type=query_type,
+                confidence=1.0,
                 entities=[],
-                needs_cross_corpus=False,
-                suggested_chunk_types=["fine", "table", "caption"],
-                suggested_top_k=50,
-                reasoning="Classification disabled",
+                needs_cross_corpus=True,
+                suggested_chunk_types=strategy["chunk_types"],
+                suggested_top_k=strategy["top_k"],
+                reasoning=f"Hybrid retrieval - {query_type.value}",
             )
-            query_type = QueryType.FACTUAL
 
         logger.info(f"Query classified as: {query_type.value}")
 
@@ -284,6 +286,36 @@ class QueryEngine:
             retrieval_count=retrieval_count,
             reranked_count=reranked_count,
         )
+
+    def _detect_targeted_query_type(self, query: str) -> QueryType:
+        """Lightweight detection for queries that benefit from targeted retrieval.
+
+        Only detects METHODS and LIMITATIONS queries which benefit from section filtering.
+        Everything else uses universal retrieval (GENERAL).
+        """
+        query_lower = query.lower()
+
+        # METHODS: queries about technical procedures benefit from section filtering
+        methods_signals = [
+            "protocol", "procedure", "synthesized", "synthesis", "purified", "purification",
+            "buffer", "concentration", "incubation", "temperature",
+            "how was", "how were", "how is", "how are",
+            "what method", "what protocol", "what buffer", "what concentration",
+            "cell line", "assay", "measured", "performed",
+        ]
+        if any(signal in query_lower for signal in methods_signals):
+            return QueryType.METHODS
+
+        # LIMITATIONS: queries about constraints benefit from discussion/conclusion sections
+        limitations_signals = [
+            "limitation", "caveat", "constraint", "weakness",
+            "drawback", "shortcoming", "without", "lacking",
+        ]
+        if any(signal in query_lower for signal in limitations_signals):
+            return QueryType.LIMITATIONS
+
+        # Everything else: universal retrieval
+        return QueryType.GENERAL
 
     def _expand_fine_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Expand fine chunks by fetching their parent section for context."""

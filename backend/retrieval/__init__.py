@@ -6,6 +6,7 @@ from .query_classifier import (
     QueryClassifier,
     QueryType,
     QueryClassification,
+    MultiQueryClassification,
     RETRIEVAL_STRATEGIES,
     classify_query_heuristic,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "QueryClassifier",
     "QueryType",
     "QueryClassification",
+    "MultiQueryClassification",
     "RETRIEVAL_STRATEGIES",
     "classify_query_heuristic",
     # Embedder

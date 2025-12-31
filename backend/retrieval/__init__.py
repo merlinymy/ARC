@@ -15,6 +15,15 @@ from .reranker import CohereReranker
 from .qdrant_store import QdrantStore
 from .query_engine import QueryEngine, QueryResult
 
+# New modules for advanced RAG
+from .cache import LRUCache, RAGCache, CacheEntry
+from .hyde import HyDE, HyDEEmbedder
+from .bm25 import BM25Vectorizer, SparseVector, HybridSearchMixer, vectorize_for_bm25
+from .query_rewriter import QueryRewriter, RewrittenQuery, rewrite_query, correct_scientific_spelling
+from .entity_extractor import EntityExtractor, LLMEntityExtractor, ExtractedEntities
+from .citation_verifier import CitationVerifier, VerificationResult
+from .conversation_memory import ConversationMemory, ConversationContext, Message
+
 __all__ = [
     # Domain synonyms
     "DOMAIN_SYNONYMS",
@@ -39,4 +48,32 @@ __all__ = [
     # Query engine
     "QueryEngine",
     "QueryResult",
+    # Caching
+    "LRUCache",
+    "RAGCache",
+    "CacheEntry",
+    # HyDE
+    "HyDE",
+    "HyDEEmbedder",
+    # BM25 / Hybrid Search
+    "BM25Vectorizer",
+    "SparseVector",
+    "HybridSearchMixer",
+    "vectorize_for_bm25",
+    # Query Rewriting
+    "QueryRewriter",
+    "RewrittenQuery",
+    "rewrite_query",
+    "correct_scientific_spelling",
+    # Entity Extraction
+    "EntityExtractor",
+    "LLMEntityExtractor",
+    "ExtractedEntities",
+    # Citation Verification
+    "CitationVerifier",
+    "VerificationResult",
+    # Conversation Memory
+    "ConversationMemory",
+    "ConversationContext",
+    "Message",
 ]

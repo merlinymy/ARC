@@ -84,17 +84,17 @@ RETRIEVAL_STRATEGIES: Dict[QueryType, Dict[str, Any]] = {
     },
     QueryType.NOVELTY: {
         "chunk_types": ["abstract", "section"],
-        "section_filter": ["introduction", "discussion", "conclusion"],
+        "section_filter": ["introduction", "discussion", "conclusion", "results_discussion", "results"],
         "top_k": 50,
         "rerank_top_n": 20,
-        "max_per_paper": 2,
+        "max_per_paper": 3,
     },
     QueryType.LIMITATIONS: {
-        "chunk_types": ["section", "abstract"],  # Added abstract for high-level limitations
-        "section_filter": ["discussion", "conclusion", "results", "limitations", "future work", "caveats"],
-        "top_k": 50,  # Increased for better coverage
+        "chunk_types": ["section", "abstract"],
+        "section_filter": ["discussion", "conclusion", "results", "results_discussion", "limitations", "future work", "caveats"],
+        "top_k": 50,
         "rerank_top_n": 15,
-        "max_per_paper": 4,  # Increased to capture more limitation mentions
+        "max_per_paper": 4,
     },
     QueryType.GENERAL: {
         # Balanced strategy for uncategorized queries - search all chunk types

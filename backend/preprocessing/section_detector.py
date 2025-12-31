@@ -20,6 +20,8 @@ class Section:
     end_idx: int
     text: str
     level: int  # 1 for main sections, 2 for subsections
+    parent_section: Optional[str] = None  # Parent section name for subsections
+    subsection_name: Optional[str] = None  # Original subsection header text
 
 
 # Common section headers in scientific papers (case-insensitive patterns)
@@ -75,6 +77,7 @@ class SectionDetector:
         candidates = []
         lines = text.split('\n')
         current_pos = 0
+        current_parent_section = None  # Track current level-1 section
 
         for line_idx, line in enumerate(lines):
             line_stripped = line.strip()
@@ -90,13 +93,31 @@ class SectionDetector:
             # Check if line matches any section pattern
             for pattern, normalized_name, level in self.patterns:
                 if pattern.match(line_stripped):
-                    candidates.append({
-                        'name': line_stripped,
-                        'normalized_name': normalized_name,
-                        'start_idx': current_pos,
-                        'level': level,
-                        'line_idx': line_idx
-                    })
+                    # Track parent section for subsections
+                    if level == 1:
+                        current_parent_section = normalized_name
+                        candidates.append({
+                            'name': line_stripped,
+                            'normalized_name': normalized_name,
+                            'start_idx': current_pos,
+                            'level': level,
+                            'line_idx': line_idx,
+                            'parent_section': None,
+                            'subsection_name': None,
+                        })
+                    else:
+                        # Level 2 subsection - inherit parent and extract header text
+                        # Remove numbering prefix to get clean subsection name
+                        subsection_header = re.sub(r'^\d+\.[\d.]*\s*', '', line_stripped).strip()
+                        candidates.append({
+                            'name': line_stripped,
+                            'normalized_name': current_parent_section or 'body',  # Use parent instead of "subsection"
+                            'start_idx': current_pos,
+                            'level': level,
+                            'line_idx': line_idx,
+                            'parent_section': current_parent_section,
+                            'subsection_name': subsection_header if subsection_header else None,
+                        })
                     break
 
             current_pos += len(line) + 1
@@ -113,7 +134,9 @@ class SectionDetector:
                 start_idx=candidate['start_idx'],
                 end_idx=end_idx,
                 text=section_text,
-                level=candidate['level']
+                level=candidate['level'],
+                parent_section=candidate.get('parent_section'),
+                subsection_name=candidate.get('subsection_name'),
             ))
 
         return sections

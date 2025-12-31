@@ -21,10 +21,10 @@ Features:
     - Progress tracking: Shows real-time progress
 
 Usage:
-    python index_papers.py                     # Index all papers (resumes if checkpoint exists)
+    python index_papers.py                     # Index all papers from PDF_SOURCE_DIR (resumes if checkpoint exists)
     python index_papers.py --limit 5           # Index only 5 papers (for testing)
     python index_papers.py --reset             # Clear collection AND checkpoint, start fresh
-    python index_papers.py --papers-dir PATH   # Use custom papers directory
+    python index_papers.py --papers-dir PATH   # Override PDF_SOURCE_DIR with custom path
 """
 
 import os
@@ -38,10 +38,49 @@ import argparse
 import logging
 import hashlib
 import json
+import time
 from pathlib import Path
-from typing import List, Dict, Any, Set
+from typing import List, Dict, Any, Set, Optional
 from datetime import datetime
-from tqdm import tqdm
+
+
+class APIError(Exception):
+    """Raised when an API error requires pausing the indexing process."""
+    pass
+
+
+def is_api_critical_error(error: Exception) -> bool:
+    """Check if an error is a critical API error that should pause indexing.
+
+    Returns True for:
+    - Rate limit errors (429)
+    - Authentication errors (401, 403)
+    - Payment/balance errors
+    - Connection errors that persist
+    """
+    error_str = str(error).lower()
+
+    # Check for rate limit
+    if "rate" in error_str and "limit" in error_str:
+        return True
+    if "429" in error_str:
+        return True
+
+    # Check for auth/payment issues
+    if "401" in error_str or "403" in error_str:
+        return True
+    if "unauthorized" in error_str or "forbidden" in error_str:
+        return True
+    if "insufficient" in error_str and ("credit" in error_str or "balance" in error_str):
+        return True
+    if "quota" in error_str and "exceeded" in error_str:
+        return True
+
+    # Check for Voyage-specific errors
+    if "voyage" in error_str and ("api" in error_str or "key" in error_str):
+        return True
+
+    return False
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -49,6 +88,8 @@ from config import settings
 from preprocessing import EnhancedPDFProcessor, Chunk, ChunkType
 from retrieval.embedder import VoyageEmbedder
 from retrieval.qdrant_store import QdrantStore
+from retrieval.bm25 import BM25Vectorizer
+from dependencies import get_dependencies
 
 # Checkpoint file for resuming interrupted indexing
 CHECKPOINT_FILE = Path("data/indexing_checkpoint.json")
@@ -164,6 +205,7 @@ def index_single_paper(
     embedder: VoyageEmbedder,
     store: QdrantStore,
     checkpoint: IndexingCheckpoint,
+    bm25_vectorizer: Optional[BM25Vectorizer] = None,
 ) -> Dict[str, Any]:
     """Process and index a single PDF.
 
@@ -173,12 +215,13 @@ def index_single_paper(
         embedder: Embedding client
         store: Qdrant store
         checkpoint: Checkpoint manager
+        bm25_vectorizer: Optional BM25 vectorizer for IDF updates
 
     Returns:
         Dict with indexing stats
     """
     paper_id = generate_paper_id(pdf_path)
-    stats = {"paper_id": paper_id, "file": pdf_path.name, "chunks": 0, "success": False}
+    stats = {"paper_id": paper_id, "file": pdf_path.name, "chunks": 0, "success": False, "texts": []}
 
     # Skip if already indexed
     if checkpoint.is_indexed(paper_id):
@@ -216,6 +259,7 @@ def index_single_paper(
                 year=chunks[0].year,
                 project_tag=chunks[0].project_tag,
                 research_area=chunks[0].research_area,
+                file_name=chunks[0].file_name,
             )
             chunks.append(full_chunk)
             embeddings.append(full_embedding)
@@ -229,6 +273,9 @@ def index_single_paper(
 
         stats["chunks"] = len(chunks)
         stats["success"] = True
+
+        # Collect texts for BM25 IDF updates (use section and abstract chunks)
+        stats["texts"] = [c.text for c in chunks if c.chunk_type in [ChunkType.ABSTRACT, ChunkType.SECTION]]
 
         # Count by type
         type_counts = {}
@@ -247,6 +294,10 @@ def index_single_paper(
         stats["error"] = error_msg
         checkpoint.mark_failed(paper_id, error_msg)
         checkpoint.save()
+
+        # Check if this is a critical API error that should stop indexing
+        if is_api_critical_error(e):
+            raise APIError(f"Critical API error: {error_msg}") from e
 
     return stats
 
@@ -276,8 +327,8 @@ Examples:
         help="Retry only previously failed papers"
     )
     parser.add_argument(
-        "--papers-dir", type=str, default="data/sample_papers",
-        help="Directory containing PDF files"
+        "--papers-dir", type=str, default=None,
+        help="Directory containing PDF files (defaults to PDF_SOURCE_DIR from .env)"
     )
 
     args = parser.parse_args()
@@ -310,16 +361,26 @@ Examples:
     )
     print("  ✓ PDF Processor (MinerU backend)")
 
+    # Use shared dependencies for consistent clients and BM25 vectorizer
+    deps = get_dependencies()
+
     embedder = VoyageEmbedder(api_key=settings.voyage_api_key)
     print(f"  ✓ Embedder (Voyage {settings.embedding_model})")
 
+    # Use shared Qdrant client and BM25 vectorizer
+    bm25_vectorizer = deps.bm25_vectorizer
     store = QdrantStore(
-        host=settings.qdrant_host,
-        port=settings.qdrant_port,
         collection_name=settings.qdrant_collection_name,
         embedding_dimension=settings.embedding_dimension,
+        client=deps.qdrant_client,
+        bm25_vectorizer=bm25_vectorizer,
     )
-    print(f"  ✓ Vector Store (Qdrant at {settings.qdrant_host}:{settings.qdrant_port})")
+    print(f"  ✓ Vector Store (Qdrant at {settings.qdrant_host}:{settings.qdrant_port}, shared client)")
+
+    if bm25_vectorizer._idf_cache:
+        print(f"  ✓ BM25 Vectorizer (shared, loaded IDF cache with {len(bm25_vectorizer._idf_cache)} terms)")
+    else:
+        print("  ✓ BM25 Vectorizer (shared, no existing IDF cache)")
 
     # Reset collection and checkpoint if requested
     if args.reset:
@@ -337,14 +398,15 @@ Examples:
     print(f"  ✓ Collection '{settings.qdrant_collection_name}' ready")
 
     # Find PDF files
-    print(f"\n[2/4] Finding PDFs in {args.papers_dir}...")
-    papers_dir = Path(args.papers_dir)
+    papers_dir = Path(args.papers_dir) if args.papers_dir else settings.pdf_source_dir
+    print(f"\n[2/4] Finding PDFs in {papers_dir}...")
 
     if not papers_dir.exists():
         print(f"  ✗ Directory not found: {papers_dir}")
         return
 
-    pdf_files = sorted(papers_dir.glob("*.pdf"))
+    # Filter out macOS AppleDouble files (._*) which are metadata, not real PDFs
+    pdf_files = sorted([f for f in papers_dir.glob("*.pdf") if not f.name.startswith("._")])
 
     # If retry-failed, only process failed papers
     if args.retry_failed:
@@ -376,22 +438,58 @@ Examples:
     newly_indexed = 0
     skipped = 0
     failed = []
+    all_texts_for_idf = []  # Collect texts for BM25 IDF update
+
+    total_papers = len(pdf_files)
 
     try:
-        for pdf_path in tqdm(pdf_files, desc="  Indexing"):
-            stats = index_single_paper(pdf_path, processor, embedder, store, checkpoint)
+        for i, pdf_path in enumerate(pdf_files, 1):
+            # Calculate progress
+            percent = (i / total_papers) * 100
+
+            # Show progress line (overwrite previous)
+            status_line = f"\r  [{i}/{total_papers}] ({percent:5.1f}%) Processing: {pdf_path.name[:50]:<50}"
+            print(status_line, end="", flush=True)
+
+            stats = index_single_paper(pdf_path, processor, embedder, store, checkpoint, bm25_vectorizer)
             all_stats.append(stats)
 
             if stats.get("skipped"):
                 skipped += 1
             elif stats["success"]:
                 newly_indexed += 1
+                # Collect texts for BM25 IDF updates
+                all_texts_for_idf.extend(stats.get("texts", []))
             else:
                 failed.append(stats["file"])
+
+        # Clear the progress line when done
+        print("\r" + " " * 100 + "\r", end="")
+
+    except APIError as e:
+        print("\n")
+        print("=" * 60)
+        print("⛔ API ERROR - INDEXING PAUSED")
+        print("=" * 60)
+        print(f"\n  Error: {e}")
+        print("\n  This usually means:")
+        print("    • Rate limit exceeded (wait and retry)")
+        print("    • API key invalid or expired")
+        print("    • Account balance depleted")
+        print("    • Quota exceeded")
+        print("\n  Progress has been saved to checkpoint.")
+        print("  Fix the issue and run again to resume.")
 
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupted! Progress saved to checkpoint.")
         print(f"   Run again to resume from where you left off.")
+
+    # Update and save BM25 IDF cache with new texts
+    if all_texts_for_idf:
+        print(f"\n  Updating BM25 IDF cache with {len(all_texts_for_idf)} text chunks...")
+        bm25_vectorizer.update_idf_incremental(all_texts_for_idf)
+        bm25_vectorizer.save_idf_cache()
+        print(f"  ✓ BM25 IDF cache saved ({len(bm25_vectorizer._idf_cache)} terms)")
 
     # Print summary
     print("\n" + "="*60)

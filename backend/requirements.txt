@@ -1,35 +1,41 @@
 # Core API Framework
-fastapi
-uvicorn[standard]
-python-multipart
+fastapi>=0.100.0,<1.0.0
+uvicorn[standard]>=0.20.0,<1.0.0
+python-multipart>=0.0.6,<1.0.0
 
 # AI/ML Libraries
-anthropic
-voyageai
-cohere
+anthropic>=0.40.0,<1.0.0
+voyageai>=0.2.0,<1.0.0
+cohere>=5.0.0,<6.0.0
 
 # PDF Processing (MinerU replaces marker-pdf, pymupdf, pdfplumber, camelot-py)
-mineru[core]
+mineru[core]>=0.1.0
 
 # Vector Database
-qdrant-client
+qdrant-client>=1.7.0,<2.0.0
 
 # Utilities
-python-dotenv
-pydantic
-pydantic-settings
+python-dotenv>=1.0.0,<2.0.0
+pydantic>=2.0.0,<3.0.0
+pydantic-settings>=2.0.0,<3.0.0
 
 # HTTP Client
-httpx
-aiofiles
+httpx>=0.25.0,<1.0.0
+aiofiles>=23.0.0,<25.0.0
 
 # Data Processing
-numpy
-pillow
-tqdm
-tiktoken
+numpy>=1.24.0,<3.0.0
+pillow>=10.0.0,<12.0.0
+tqdm>=4.65.0,<5.0.0
+tiktoken>=0.5.0,<1.0.0
+
+# Database & Auth
+sqlalchemy>=2.0.0,<3.0.0
+aiosqlite>=0.19.0,<1.0.0
+python-jose[cryptography]>=3.3.0,<4.0.0
+passlib[bcrypt]>=1.7.0,<2.0.0
 
 # Testing & Evaluation
-pytest
-pytest-asyncio
-pandas
+pytest>=7.0.0,<9.0.0
+pytest-asyncio>=0.21.0,<1.0.0
+pandas>=2.0.0,<3.0.0

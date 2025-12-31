@@ -11,7 +11,7 @@ Rate limits (with payment method):
 
 import logging
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import numpy as np
 import voyageai
 
@@ -171,22 +171,27 @@ class VoyageEmbedder:
 
     def embed_paper_sections(
         self,
-        sections: List[str],
+        sections: List[Tuple[str, str]],
         exclude_sections: Optional[List[str]] = None
     ) -> List[float]:
         """Create a full-paper embedding from sections.
 
         Args:
-            sections: List of section texts
-            exclude_sections: Section types to exclude (e.g., references)
+            sections: List of (section_name, section_text) tuples
+            exclude_sections: Section names to exclude (e.g., ["references"])
 
         Returns:
             Mean-pooled embedding for the full paper
         """
-        # Filter out excluded sections
-        valid_sections = sections
+        # Filter out excluded sections by name (case-insensitive)
         if exclude_sections:
-            valid_sections = [s for s in sections if s not in exclude_sections]
+            exclude_lower = [name.lower() for name in exclude_sections]
+            valid_sections = [
+                text for name, text in sections
+                if name.lower() not in exclude_lower
+            ]
+        else:
+            valid_sections = [text for _, text in sections]
 
         if not valid_sections:
             logger.warning("No valid sections for paper embedding")

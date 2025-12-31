@@ -5,10 +5,19 @@ to improve relevance ranking beyond embedding similarity.
 """
 
 import logging
-from typing import List, Dict, Any
+from dataclasses import dataclass
+from typing import List, Dict, Any, Tuple
 import cohere
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RerankResult:
+    """Result from reranking operation."""
+    documents: List[Dict[str, Any]]
+    success: bool
+    error: str | None = None
 
 
 class CohereReranker:
@@ -36,7 +45,7 @@ class CohereReranker:
         documents: List[Dict[str, Any]],
         top_n: int = 15,
         text_field: str = "text"
-    ) -> List[Dict[str, Any]]:
+    ) -> RerankResult:
         """Rerank documents by relevance to query.
 
         Args:
@@ -46,10 +55,10 @@ class CohereReranker:
             text_field: Field name containing the text to rerank on
 
         Returns:
-            Top N documents sorted by rerank score, with 'rerank_score' added
+            RerankResult with documents and success status
         """
         if not documents:
-            return []
+            return RerankResult(documents=[], success=True)
 
         # Extract texts for reranking
         texts = [doc[text_field] for doc in documents]
@@ -71,12 +80,22 @@ class CohereReranker:
                 reranked.append(doc)
 
             logger.debug(f"Reranked {len(documents)} docs to top {len(reranked)}")
-            return reranked
+            return RerankResult(documents=reranked, success=True)
 
         except Exception as e:
             logger.error(f"Reranking failed: {e}")
+            error_msg = str(e)
+            # Detect rate limiting
+            if "429" in error_msg or "rate" in error_msg.lower():
+                error_msg = "Cohere rate limit exceeded - using unranked results"
+            else:
+                error_msg = f"Reranking failed: {error_msg}"
             # Return original documents without reranking on error
-            return documents[:top_n]
+            return RerankResult(
+                documents=documents[:top_n],
+                success=False,
+                error=error_msg
+            )
 
     def rerank_with_metadata(
         self,
@@ -85,7 +104,7 @@ class CohereReranker:
         top_n: int = 15,
         text_field: str = "text",
         max_per_paper: int = 3
-    ) -> List[Dict[str, Any]]:
+    ) -> RerankResult:
         """Rerank and deduplicate by paper_id.
 
         Args:
@@ -96,16 +115,16 @@ class CohereReranker:
             max_per_paper: Maximum chunks per paper in results
 
         Returns:
-            Reranked and deduplicated results
+            RerankResult with deduplicated documents and success status
         """
         # First rerank all documents
-        reranked = self.rerank(query, documents, top_n=len(documents), text_field=text_field)
+        rerank_result = self.rerank(query, documents, top_n=len(documents), text_field=text_field)
 
         # Deduplicate by paper_id
         paper_counts: Dict[str, int] = {}
         deduplicated = []
 
-        for doc in reranked:
+        for doc in rerank_result.documents:
             paper_id = doc.get('paper_id', 'unknown')
 
             if paper_id not in paper_counts:
@@ -118,4 +137,8 @@ class CohereReranker:
             if len(deduplicated) >= top_n:
                 break
 
-        return deduplicated
+        return RerankResult(
+            documents=deduplicated,
+            success=rerank_result.success,
+            error=rerank_result.error
+        )

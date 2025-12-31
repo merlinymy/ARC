@@ -27,6 +27,7 @@ build/
 resource/
 qdrant_data/
 data/
+backend/data/
 
 # IDEs
 .vscode/

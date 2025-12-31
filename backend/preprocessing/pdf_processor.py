@@ -21,6 +21,7 @@ import tempfile
 import json
 import re
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import tiktoken
 
 from .models import ChunkType, PaperMetadata, Chunk
@@ -56,15 +57,20 @@ class MinerUContent:
 class MinerUExtractor:
     """Extract content from PDFs using MinerU."""
 
-    def __init__(self, use_gpu: bool = True, lang: str = "en"):
+    # Default timeout for PDF extraction (5 minutes)
+    DEFAULT_TIMEOUT = 300
+
+    def __init__(self, use_gpu: bool = True, lang: str = "en", timeout: int = DEFAULT_TIMEOUT):
         """Initialize MinerU extractor.
 
         Args:
             use_gpu: Whether to use GPU acceleration
             lang: Language for OCR ('en', 'ch', etc.)
+            timeout: Maximum seconds to wait for extraction (default: 300)
         """
         self.lang = lang
         self.use_gpu = use_gpu
+        self.timeout = timeout
         self._initialized = False
 
     def _ensure_initialized(self):
@@ -93,7 +99,17 @@ class MinerUExtractor:
         self._ensure_initialized()
 
         try:
-            return self._extract_with_mineru(pdf_path)
+            # Use ThreadPoolExecutor for timeout support (works on macOS)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self._extract_with_mineru, pdf_path)
+                try:
+                    return future.result(timeout=self.timeout)
+                except FuturesTimeoutError:
+                    logger.error(f"MinerU extraction timed out after {self.timeout}s for {pdf_path.name}")
+                    raise TimeoutError(f"PDF extraction timed out after {self.timeout} seconds")
+        except TimeoutError:
+            # Re-raise timeout errors to be caught by caller
+            raise
         except Exception as e:
             logger.warning(f"MinerU extraction failed, falling back: {e}")
             return self._fallback_extract(pdf_path)
@@ -463,7 +479,7 @@ class EnhancedPDFProcessor:
         abstract_max_tokens: int = 300,
         section_max_tokens: int = 2000,
         fine_chunk_tokens: int = 500,
-        fine_chunk_overlap: int = 128,
+        fine_chunk_overlap: int = 128,        extraction_timeout: int = 300,
     ):
         """Initialize enhanced processor.
 
@@ -472,6 +488,7 @@ class EnhancedPDFProcessor:
             section_max_tokens: Max tokens per section
             fine_chunk_tokens: Target tokens for fine chunks
             fine_chunk_overlap: Overlap between fine chunks
+            extraction_timeout: Max seconds for PDF extraction (default: 300)
         """
         self.chunker = PaperChunker(
             abstract_max_tokens=abstract_max_tokens,
@@ -479,7 +496,7 @@ class EnhancedPDFProcessor:
             fine_chunk_tokens=fine_chunk_tokens,
             fine_chunk_overlap=fine_chunk_overlap,
         )
-        self.extractor = MinerUExtractor()
+        self.extractor = MinerUExtractor(timeout=extraction_timeout)
         self._legacy_processor = PDFProcessor()
 
         logger.info("Initialized EnhancedPDFProcessor with MinerU backend")
@@ -495,13 +512,21 @@ class EnhancedPDFProcessor:
         """
         content = self.extractor.extract(pdf_path)
 
-        title = content.metadata.get('title', '') or pdf_path.stem
+        # Extract title: PDF metadata > MinerU extraction > filename
+        title = self._extract_title_from_pdf_metadata(pdf_path)
+        if not title:
+            title = content.metadata.get('title', '') or pdf_path.stem
         if not title or title.strip() == '':
             title = pdf_path.stem
 
+        # Extract authors: PDF metadata > text heuristics
+        authors = self._extract_authors_from_pdf_metadata(pdf_path)
+        if not authors:
+            authors = self._extract_authors_from_text(content.full_text)
+
         metadata = {
             'title': title,
-            'authors': self._extract_authors_from_text(content.full_text),
+            'authors': authors,
             'year': self._extract_year(pdf_path),
             'num_pages': content.metadata.get('num_pages', 0),
             'file_name': pdf_path.name,
@@ -510,9 +535,106 @@ class EnhancedPDFProcessor:
         return content.full_text, metadata
 
     def _extract_authors_from_text(self, text: str) -> List[str]:
-        """Try to extract authors from text (basic heuristic)."""
-        # This is a simplified approach - MinerU doesn't always extract author metadata
-        return []
+        """Extract authors from text using heuristics.
+
+        Looks for author patterns in the first ~2000 chars (before abstract).
+        Common patterns:
+        - Names separated by commas or 'and'
+        - Names with superscripts (affiliations)
+        - Names after title, before Abstract
+        """
+        if not text:
+            return []
+
+        # Focus on first ~2000 chars (title + authors area)
+        header_text = text[:2000]
+
+        # Find text before "Abstract" (authors are usually there)
+        abstract_match = re.search(r'\bAbstract\b', header_text, re.IGNORECASE)
+        if abstract_match:
+            header_text = header_text[:abstract_match.start()]
+
+        # Skip the title (usually first line or two)
+        lines = header_text.strip().split('\n')
+        if len(lines) > 1:
+            # Skip first 1-2 lines (likely title)
+            author_section = '\n'.join(lines[1:5])
+        else:
+            author_section = header_text
+
+        # Clean up the text
+        author_section = re.sub(r'\d+\s*,?\s*', '', author_section)  # Remove superscript numbers
+        author_section = re.sub(r'[*†‡§∥⊥#]', '', author_section)  # Remove symbols
+        author_section = re.sub(r'\([^)]*\)', '', author_section)  # Remove parentheticals
+
+        # Pattern for names: Capitalized words that look like names
+        # Matches patterns like "John Smith", "Jean-Pierre Martin", "O'Brien"
+        name_pattern = r"([A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?))"
+
+        # Find all potential names
+        potential_names = re.findall(name_pattern, author_section)
+
+        # Filter and clean names
+        authors = []
+        seen = set()
+        for name in potential_names:
+            name = name.strip()
+            # Must have at least 2 parts (first + last) and not be common words
+            parts = name.split()
+            if len(parts) >= 2:
+                # Skip common non-name words
+                skip_words = {'The', 'This', 'That', 'These', 'From', 'With', 'University',
+                             'Department', 'Institute', 'Center', 'Laboratory', 'School'}
+                if parts[0] not in skip_words and name.lower() not in seen:
+                    seen.add(name.lower())
+                    authors.append(name)
+
+            # Limit to reasonable number of authors
+            if len(authors) >= 15:
+                break
+
+        return authors
+
+    def _extract_authors_from_pdf_metadata(self, pdf_path: Path) -> List[str]:
+        """Extract authors from PDF document metadata."""
+        try:
+            import pypdfium2 as pdfium
+            doc = pdfium.PdfDocument(pdf_path)
+            metadata = doc.get_metadata_dict()
+
+            author_str = metadata.get('Author', '') or metadata.get('Creator', '')
+            if not author_str:
+                return []
+
+            # Split by common separators
+            authors = []
+            for sep in [';', ',', ' and ', '&']:
+                if sep in author_str:
+                    authors = [a.strip() for a in author_str.split(sep) if a.strip()]
+                    break
+
+            if not authors and author_str.strip():
+                authors = [author_str.strip()]
+
+            return authors
+        except Exception as e:
+            logger.debug(f"Could not extract PDF metadata: {e}")
+            return []
+
+    def _extract_title_from_pdf_metadata(self, pdf_path: Path) -> Optional[str]:
+        """Extract title from PDF document metadata."""
+        try:
+            import pypdfium2 as pdfium
+            doc = pdfium.PdfDocument(pdf_path)
+            metadata = doc.get_metadata_dict()
+
+            title = metadata.get('Title', '')
+            if title and len(title) > 5 and title != pdf_path.stem:
+                return title.strip()
+            return None
+        except Exception as e:
+            logger.debug(f"Could not extract PDF title metadata: {e}")
+            return None
 
     def _extract_year(self, pdf_path: Path) -> Optional[int]:
         """Extract publication year from filename."""
@@ -546,13 +668,23 @@ class EnhancedPDFProcessor:
         full_text = content.full_text
         meta = content.metadata
 
-        title = meta.get('title', '') or pdf_path.stem
+        # Extract title: PDF metadata > MinerU extraction > filename
+        title = self._extract_title_from_pdf_metadata(pdf_path)
+        if not title:
+            title = meta.get('title', '') or pdf_path.stem
+        if not title or title.strip() == '':
+            title = pdf_path.stem
+
+        # Extract authors: PDF metadata > text heuristics
+        authors = self._extract_authors_from_pdf_metadata(pdf_path)
+        if not authors:
+            authors = self._extract_authors_from_text(full_text)
 
         # Create paper metadata
         paper_metadata = PaperMetadata(
             paper_id=paper_id,
             title=title,
-            authors=self._extract_authors_from_text(full_text),
+            authors=authors,
             year=self._extract_year(pdf_path),
             num_pages=meta.get('num_pages', 0),
             file_name=meta.get('file_name', pdf_path.name),

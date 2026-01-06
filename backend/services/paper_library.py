@@ -618,6 +618,7 @@ class PaperLibraryService:
                 section_max_tokens=settings.section_max_tokens,
                 fine_chunk_tokens=settings.fine_chunk_tokens,
                 fine_chunk_overlap=settings.fine_chunk_overlap,
+                extraction_timeout=settings.pdf_extraction_timeout,
             )
 
             # Process PDF into chunks

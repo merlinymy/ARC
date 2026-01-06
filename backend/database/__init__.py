@@ -7,7 +7,7 @@ from .database import (
     init_db,
     create_default_user,
 )
-from .models import Base, User, Conversation, Message, UserMemory, UploadTask
+from .models import Base, User, Conversation, Message, UserMemory, UploadTask, UserPreferences
 
 __all__ = [
     "engine",
@@ -21,4 +21,5 @@ __all__ = [
     "Message",
     "UserMemory",
     "UploadTask",
+    "UserPreferences",
 ]

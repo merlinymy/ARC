@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
 
+    # Logging Settings
+    log_dir: str = Field(default="logs", description="Directory for log files")
+    enable_file_logging: bool = Field(default=True, description="Enable logging to files")
+    enable_json_logging: bool = Field(default=False, description="Use JSON format for logs")
+    enable_access_logging: bool = Field(default=True, description="Enable detailed API access logging")
+
     # Paths - pdf_source_dir is optional to allow app startup without indexing
     pdf_source_dir: Optional[Path] = Field(default=None, description="Directory containing PDF files to index")
     processed_data_dir: Path = Path("./processed_data")
@@ -74,6 +80,10 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 128
     batch_size: int = 100
+    pdf_extraction_timeout: int = Field(
+        default=900,
+        description="Timeout in seconds for PDF extraction (MinerU). After timeout, falls back to simple extraction."
+    )
 
     # API Settings
     api_host: str = "0.0.0.0"

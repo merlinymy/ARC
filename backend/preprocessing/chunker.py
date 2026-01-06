@@ -451,6 +451,13 @@ class PaperChunker:
                 ))
                 chunk_idx += 1
 
+        # 6. Fallback: if no chunks created, do full-text chunking
+        if not chunks and len(text) > 200:
+            logger.warning(
+                f"No structure found for {metadata.paper_id}, using fallback chunking"
+            )
+            chunks = self._create_fallback_chunks(text, metadata, start_idx=chunk_idx)
+
         logger.info(
             f"Created {len(chunks)} chunks for {metadata.paper_id}: "
             f"{sum(1 for c in chunks if c.chunk_type == ChunkType.ABSTRACT)} abstract, "
@@ -461,6 +468,49 @@ class PaperChunker:
         )
 
         return chunks
+
+    def _create_fallback_chunks(
+        self,
+        text: str,
+        metadata: PaperMetadata,
+        start_idx: int = 0,
+    ) -> List[Chunk]:
+        """Create fine chunks from raw text when no structure is detected.
+
+        Used as a fallback for papers without standard sections/abstract.
+        Reuses _create_contextual_fine_chunks to maintain consistent behavior.
+
+        Args:
+            text: Full text of the paper
+            metadata: Paper metadata
+            start_idx: Starting chunk index
+
+        Returns:
+            List of Chunk objects
+        """
+        # Create a dummy parent chunk for the fallback context
+        parent_chunk = Chunk(
+            chunk_id=f"{metadata.paper_id}_content",
+            paper_id=metadata.paper_id,
+            chunk_type=ChunkType.SECTION,
+            text="",  # Not stored, just for reference
+            section_name="content",
+            title=metadata.title,
+            authors=metadata.authors,
+            year=metadata.year,
+            project_tag=metadata.project_tag,
+            research_area=metadata.research_area,
+            file_name=metadata.file_name,
+        )
+
+        # Use the existing paragraph-aware chunking
+        return self._create_contextual_fine_chunks(
+            text=text,
+            section_name="content",  # Generic section name
+            parent_chunk=parent_chunk,
+            metadata=metadata,
+            start_idx=start_idx,
+        )
 
     def _truncate_at_sentence(self, text: str, max_tokens: int) -> str:
         """Truncate text at a sentence boundary, not mid-sentence.

@@ -10,7 +10,7 @@ from typing import List, Optional, Callable
 from fastapi import FastAPI, HTTPException, Depends, Request, Response, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import json
 from datetime import datetime
 import sys
@@ -21,6 +21,7 @@ import logging
 sys.path.append(str(Path(__file__).parent.parent))
 
 from config import settings
+from logging_config import setup_logging, RequestLogger
 from dependencies import (
     get_dependencies,
     get_qdrant_client,
@@ -35,7 +36,7 @@ from services.chat_service import ChatService
 from services.memory_service import MemoryService
 from services.upload_queue import UploadQueueService
 from database import async_session_maker
-from database import get_async_session, init_db, create_default_user, User
+from database import get_async_session, init_db, create_default_user, User, UserPreferences
 from auth import verify_password, create_access_token, get_current_user, get_current_user_optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -142,6 +143,14 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle - startup and shutdown."""
     global upload_queue_service
 
+    # Setup logging first
+    setup_logging(
+        log_level=settings.log_level,
+        log_dir=settings.log_dir,
+        enable_json=settings.enable_json_logging,
+        enable_file=settings.enable_file_logging,
+    )
+
     # Startup: dependencies are lazily initialized on first access
     logger.info("Starting Research Paper RAG API...")
 
@@ -213,8 +222,27 @@ async def request_middleware(request: Request, call_next: Callable) -> Response:
         )
 
     try:
+        # Get user info from request state (will be set by auth middleware if authenticated)
+        user_id = None
+        try:
+            # Try to extract user from token without failing the request
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                # This is just for logging, don't fail if token is invalid
+                from jose import jwt
+                from jose.exceptions import JWTError
+                try:
+                    token = auth_header.split(" ")[1]
+                    payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+                    user_id = payload.get("sub")
+                except (JWTError, IndexError):
+                    pass
+        except Exception:
+            pass  # Don't fail request if user extraction fails
+
         # Rate limiting (use client IP or API key as identifier)
         client_id = request.headers.get("X-API-Key") or request.client.host if request.client else "unknown"
+        client_ip = request.client.host if request.client else None
 
         if not await rate_limiter.is_allowed(client_id):
             await shutdown_handler.end_request()
@@ -229,22 +257,51 @@ async def request_middleware(request: Request, call_next: Callable) -> Response:
                 }
             )
 
-        # Log request with correlation ID
-        logger.info(f"[{request_id}] {request.method} {request.url.path}")
+        # Create request logger
+        request_logger = RequestLogger(request_id, user_id)
+
+        # Log request with details (if access logging enabled)
+        if settings.enable_access_logging:
+            query_params = dict(request.query_params) if request.query_params else None
+            request_logger.log_request(
+                method=request.method,
+                path=request.url.path,
+                query_params=query_params,
+                client_ip=client_ip,
+            )
 
         # Process request
         start_time = time.time()
-        response = await call_next(request)
-        duration = time.time() - start_time
+        try:
+            response = await call_next(request)
+            duration_ms = (time.time() - start_time) * 1000
 
-        # Add tracing headers to response
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Response-Time"] = f"{duration:.3f}s"
-        response.headers["X-RateLimit-Remaining"] = str(rate_limiter.get_remaining(client_id))
+            # Log response
+            if settings.enable_access_logging:
+                request_logger.log_response(
+                    method=request.method,
+                    path=request.url.path,
+                    status_code=response.status_code,
+                    duration_ms=duration_ms,
+                )
 
-        logger.info(f"[{request_id}] Completed in {duration:.3f}s with status {response.status_code}")
+            # Add tracing headers to response
+            response.headers["X-Request-ID"] = request_id
+            response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
+            response.headers["X-RateLimit-Remaining"] = str(rate_limiter.get_remaining(client_id))
 
-        return response
+            return response
+
+        except Exception as e:
+            # Log error
+            duration_ms = (time.time() - start_time) * 1000
+            request_logger.log_error(
+                method=request.method,
+                path=request.url.path,
+                error=e,
+            )
+            raise
+
     finally:
         await shutdown_handler.end_request()
 
@@ -299,6 +356,26 @@ class QueryRequest(BaseModel):
         default=None,
         description="Enable citation verification. If None, uses system default."
     )
+    response_mode: str = Field(
+        default="detailed",
+        description="Response detail level. 'concise' for brief answers, 'detailed' for comprehensive explanations with more context and depth."
+    )
+    enable_general_knowledge: bool = Field(
+        default=True,
+        description="Enable LLM general knowledge. When enabled, responses will clearly separate RAG-sourced content from general knowledge."
+    )
+    enable_web_search: bool = Field(
+        default=False,
+        description="Enable Claude web search. When enabled, Claude can search the web for additional context. Web-sourced content will be clearly marked."
+    )
+
+    @field_validator('response_mode')
+    @classmethod
+    def validate_response_mode(cls, v: str) -> str:
+        valid_modes = ['concise', 'detailed']
+        if v not in valid_modes:
+            raise ValueError(f"response_mode must be one of {valid_modes}, got '{v}'")
+        return v
 
 
 class Source(BaseModel):
@@ -332,6 +409,9 @@ class QueryResponse(BaseModel):
     reranked_count: int
     warnings: List[str] = []
     citation_checks: List[CitationCheck] = []
+    response_mode: str = "detailed"
+    used_general_knowledge: bool = True
+    used_web_search: bool = False
 
 
 @app.get("/")
@@ -480,6 +560,9 @@ async def query_papers(
     persisted to the database for chat history.
     """
     try:
+        # Log received query options
+        logger.info(f"Query request received - response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
+
         # Use the full QueryEngine pipeline
         result = query_engine.query(
             request.question,
@@ -489,6 +572,9 @@ async def query_papers(
             enable_hyde_override=request.enable_hyde,
             enable_expansion_override=request.enable_expansion,
             enable_citation_check_override=request.enable_citation_check,
+            response_mode=request.response_mode,
+            enable_general_knowledge=request.enable_general_knowledge,
+            enable_web_search=request.enable_web_search,
         )
 
         # Convert sources to API response format
@@ -568,6 +654,9 @@ async def query_papers(
             reranked_count=result.reranked_count,
             warnings=result.warnings,
             citation_checks=citation_checks,
+            response_mode=request.response_mode,
+            used_general_knowledge=request.enable_general_knowledge,
+            used_web_search=request.enable_web_search,
         )
 
     except Exception as e:
@@ -599,6 +688,8 @@ async def query_papers_stream(
     If conversation_id is provided and user is authenticated, messages will be
     persisted to the database for chat history.
     """
+    # Log received query options for streaming endpoint
+    logger.info(f"Stream query request - response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
 
     async def event_generator():
         progress_events = []
@@ -623,6 +714,9 @@ async def query_papers_stream(
                     enable_hyde_override=request.enable_hyde,
                     enable_expansion_override=request.enable_expansion,
                     enable_citation_check_override=request.enable_citation_check,
+                    response_mode=request.response_mode,
+                    enable_general_knowledge=request.enable_general_knowledge,
+                    enable_web_search=request.enable_web_search,
                 )
                 result_holder[0] = result
             except Exception as e:
@@ -687,6 +781,9 @@ async def query_papers_stream(
                 "reranked_count": result.reranked_count,
                 "warnings": result.warnings,
                 "citation_checks": citation_checks,
+                "response_mode": request.response_mode,
+                "used_general_knowledge": request.enable_general_knowledge,
+                "used_web_search": request.enable_web_search,
             }
             yield f"data: {json.dumps(final_data)}\n\n"
 
@@ -1088,10 +1185,18 @@ async def get_paper_pdf(
 @app.delete("/papers/{paper_id}", response_model=DeleteResponse)
 async def delete_paper(
     paper_id: str,
+    request: Request,
     library: PaperLibraryService = Depends(get_paper_library_service),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Delete a paper and all its associated data."""
     try:
+        # Log user operation
+        request_id = request.headers.get("X-Request-ID", "")
+        user_id = str(current_user.id) if current_user else None
+        req_logger = RequestLogger(request_id, user_id)
+        req_logger.log_user_operation("delete_paper", {"paper_id": paper_id})
+
         result = library.delete_paper(paper_id)
         return DeleteResponse(
             paper_id=paper_id,
@@ -1295,7 +1400,8 @@ class BatchStatusResponse(BaseModel):
 
 @app.post("/papers/upload/batch/init", response_model=BatchUploadInitResponse)
 async def init_batch_upload(
-    request: BatchUploadInitRequest,
+    batch_request: BatchUploadInitRequest,
+    request: Request,
     queue: UploadQueueService = Depends(get_upload_queue),
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
@@ -1304,20 +1410,29 @@ async def init_batch_upload(
     Creates upload tasks for each file in the batch. Files should be uploaded
     individually using the /papers/upload/batch/{batch_id}/file endpoint.
     """
-    if len(request.filenames) > 20:
+    if len(batch_request.filenames) > 20:
         raise HTTPException(status_code=400, detail="Maximum 20 files per batch")
 
     # Validate all filenames are PDFs
-    for filename in request.filenames:
+    for filename in batch_request.filenames:
         if not filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail=f"Only PDF files are allowed: {filename}")
 
     batch_id = await queue.create_batch(user_id=current_user.id if current_user else None)
 
+    # Log user operation
+    request_id = request.headers.get("X-Request-ID", "")
+    user_id = str(current_user.id) if current_user else None
+    req_logger = RequestLogger(request_id, user_id)
+    req_logger.log_user_operation("init_batch_upload", {
+        "batch_id": batch_id,
+        "file_count": len(batch_request.filenames)
+    })
+
     tasks = []
-    for i, filename in enumerate(request.filenames):
+    for i, filename in enumerate(batch_request.filenames):
         # Higher index = lower priority (first file has highest priority)
-        priority = len(request.filenames) - i
+        priority = len(batch_request.filenames) - i
         task = await queue.add_task(
             batch_id=batch_id,
             filename=filename,
@@ -1625,6 +1740,125 @@ async def get_me(
         id=current_user.id,
         username=current_user.username,
         created_at=current_user.created_at,
+    )
+
+
+# =============================================================================
+# User Preferences Endpoints
+# =============================================================================
+
+class UserPreferencesResponse(BaseModel):
+    """Response model for user preferences."""
+    query_type: str = "auto"
+    top_k: int = 15
+    temperature: float = 0.3
+    max_chunks_per_paper: Optional[int] = None  # None = auto
+    response_mode: str = "detailed"
+    enable_hyde: bool = True
+    enable_expansion: bool = True
+    enable_citation_check: bool = True
+    enable_general_knowledge: bool = True
+    enable_web_search: bool = False
+
+
+class UserPreferencesRequest(BaseModel):
+    """Request model for updating user preferences."""
+    query_type: Optional[str] = None
+    top_k: Optional[int] = None
+    temperature: Optional[float] = None
+    max_chunks_per_paper: Optional[int] = None
+    response_mode: Optional[str] = None
+    enable_hyde: Optional[bool] = None
+    enable_expansion: Optional[bool] = None
+    enable_citation_check: Optional[bool] = None
+    enable_general_knowledge: Optional[bool] = None
+    enable_web_search: Optional[bool] = None
+
+
+@app.get("/user/preferences", response_model=UserPreferencesResponse)
+async def get_user_preferences(
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get current user's preferences."""
+    result = await session.execute(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    )
+    prefs = result.scalar_one_or_none()
+
+    if not prefs:
+        # Return defaults if no preferences saved
+        return UserPreferencesResponse()
+
+    return UserPreferencesResponse(
+        query_type=prefs.query_type,
+        top_k=prefs.top_k,
+        temperature=prefs.temperature,
+        max_chunks_per_paper=prefs.max_chunks_per_paper,
+        response_mode=prefs.response_mode,
+        enable_hyde=prefs.enable_hyde,
+        enable_expansion=prefs.enable_expansion,
+        enable_citation_check=prefs.enable_citation_check,
+        enable_general_knowledge=prefs.enable_general_knowledge,
+        enable_web_search=prefs.enable_web_search,
+    )
+
+
+@app.put("/user/preferences", response_model=UserPreferencesResponse)
+async def update_user_preferences(
+    request: UserPreferencesRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Update current user's preferences."""
+    result = await session.execute(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    )
+    prefs = result.scalar_one_or_none()
+
+    if not prefs:
+        # Create new preferences
+        prefs = UserPreferences(user_id=current_user.id)
+        session.add(prefs)
+
+    # Update only provided fields
+    if request.query_type is not None:
+        prefs.query_type = request.query_type
+    if request.top_k is not None:
+        prefs.top_k = request.top_k
+    if request.temperature is not None:
+        prefs.temperature = request.temperature
+    if request.max_chunks_per_paper is not None:
+        prefs.max_chunks_per_paper = request.max_chunks_per_paper
+    if request.response_mode is not None:
+        prefs.response_mode = request.response_mode
+    if request.enable_hyde is not None:
+        prefs.enable_hyde = request.enable_hyde
+    if request.enable_expansion is not None:
+        prefs.enable_expansion = request.enable_expansion
+    if request.enable_citation_check is not None:
+        prefs.enable_citation_check = request.enable_citation_check
+    if request.enable_general_knowledge is not None:
+        prefs.enable_general_knowledge = request.enable_general_knowledge
+    if request.enable_web_search is not None:
+        prefs.enable_web_search = request.enable_web_search
+
+    await session.commit()
+    await session.refresh(prefs)
+
+    logger.info(f"Updated preferences for user {current_user.username}")
+
+    return UserPreferencesResponse(
+        query_type=prefs.query_type,
+        top_k=prefs.top_k,
+        temperature=prefs.temperature,
+        max_chunks_per_paper=prefs.max_chunks_per_paper,
+        response_mode=prefs.response_mode,
+        enable_hyde=prefs.enable_hyde,
+        enable_expansion=prefs.enable_expansion,
+        enable_citation_check=prefs.enable_citation_check,
+        enable_general_knowledge=prefs.enable_general_knowledge,
+        enable_web_search=prefs.enable_web_search,
     )
 
 

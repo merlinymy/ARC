@@ -137,62 +137,219 @@ class QueryResult:
     citation_checks: List[CitationCheckResult] = field(default_factory=list)
 
 
-# Query-type-specific system prompts (instructions only, no query/sources)
-SYSTEM_PROMPTS = {
+# Query-type-specific system prompts with concise and detailed variants
+# Each query type has two modes: "concise" (brief, focused) and "detailed" (comprehensive, in-depth)
+
+SYSTEM_PROMPTS_CONCISE = {
     QueryType.FACTUAL: """You are a research assistant answering factual questions about scientific literature.
 
 Based on the retrieved sources, provide a direct, accurate answer to the question.
 Include specific values, definitions, or mechanisms when available.
+Keep your response focused and concise.
 Cite sources using [Source N] format.""",
 
     QueryType.FRAMING: """You are a research writing strategist helping position research for publication.
 
 Based on the retrieved literature, provide STRATEGIC ADVICE on how to frame and position the research.
-Focus on:
-- Rhetorical strategies and positioning language
-- How to articulate the unique value proposition
-- Key differentiating factors to emphasize
-- Language patterns from successful papers
+Focus on key differentiating factors and positioning language.
 
-IMPORTANT: End your response with a "## Recommended Positioning Framework" section that provides a concise, actionable strategy the user can directly apply to their writing.
-
+End with a brief "## Recommended Positioning Framework" section.
 Cite sources using [Source N] format.""",
 
     QueryType.METHODS: """You are a research methods expert helping with technical writing.
 
 Based on the retrieved methods sections, provide technical guidance on protocols and procedures.
-Include specific details like reagents, conditions, and equipment when available.
+Include key details like reagents, conditions, and equipment.
+Keep your response focused on the essential steps.
 Cite sources using [Source N] format.""",
 
     QueryType.SUMMARY: """You are a research assistant summarizing scientific literature.
 
-Based on the retrieved content, provide a structured summary of the key findings.
-Include major results, conclusions, and implications.
+Based on the retrieved content, provide a concise summary of the key findings.
+Focus on major results and conclusions.
 Cite sources using [Source N] format.""",
 
     QueryType.COMPARATIVE: """You are a research analyst comparing approaches across the literature.
 
-Based on the retrieved sources, compare and contrast the different approaches, methods, or findings.
-Highlight similarities, differences, and trade-offs.
+Based on the retrieved sources, briefly compare and contrast the different approaches.
+Highlight key similarities and differences.
 Cite sources using [Source N] format.""",
 
     QueryType.NOVELTY: """You are a research strategist assessing novelty and contribution.
 
-Based on the retrieved literature, help assess what aspects might be novel or defensible as contributions.
-Consider what has been done before and what gaps exist.
+Based on the retrieved literature, briefly assess what aspects might be novel.
+Identify key gaps and potential contributions.
 Cite sources using [Source N] format.""",
 
     QueryType.LIMITATIONS: """You are a research writing assistant helping discuss limitations.
 
-Based on how limitations are discussed in similar literature, help frame constraints and caveats.
-Focus on balanced, honest presentation of limitations while maintaining scientific credibility.
+Based on how limitations are discussed in similar literature, briefly frame constraints and caveats.
+Focus on the most important limitations.
 Cite sources using [Source N] format.""",
 
     QueryType.GENERAL: """You are a research assistant helping with questions about scientific literature.
 
-Based on the retrieved sources, provide a helpful and comprehensive answer to the question.
-Draw on relevant information from the sources and cite them using [Source N] format.""",
+Based on the retrieved sources, provide a focused answer to the question.
+Cite sources using [Source N] format.""",
 }
+
+SYSTEM_PROMPTS_DETAILED = {
+    QueryType.FACTUAL: """You are a research assistant answering factual questions about scientific literature.
+
+Based on the retrieved sources, provide a comprehensive, accurate answer to the question.
+Include:
+- Specific values, definitions, and mechanisms with full context
+- Background information that helps understand the answer
+- Multiple perspectives or values if sources differ
+- Relevant caveats or conditions that affect the answer
+
+Explain the significance and implications where relevant.
+Cite sources using [Source N] format throughout your response.""",
+
+    QueryType.FRAMING: """You are a research writing strategist helping position research for publication.
+
+Based on the retrieved literature, provide COMPREHENSIVE STRATEGIC ADVICE on how to frame and position the research.
+
+Cover these aspects in depth:
+- Rhetorical strategies and positioning language used by successful papers
+- How to articulate the unique value proposition with specific examples
+- Key differentiating factors to emphasize and why they matter
+- Language patterns and phrases from successful papers you can adapt
+- Common pitfalls to avoid in framing
+- How different journals/audiences might respond to different framings
+
+IMPORTANT: End your response with a detailed "## Recommended Positioning Framework" section that provides:
+1. Suggested narrative arc
+2. Key claims to emphasize
+3. Specific language recommendations
+4. Positioning relative to existing literature
+
+Cite sources using [Source N] format throughout your response.""",
+
+    QueryType.METHODS: """You are a research methods expert helping with technical writing.
+
+Based on the retrieved methods sections, provide comprehensive technical guidance on protocols and procedures.
+
+Include detailed information on:
+- Step-by-step protocols with all relevant parameters
+- Specific reagents, concentrations, and preparation details
+- Equipment specifications and settings
+- Timing, temperatures, and critical conditions
+- Controls and validation steps
+- Common variations across different papers
+- Tips for reproducibility and troubleshooting
+- Quality control checkpoints
+
+Explain the rationale behind key methodological choices where evident from the sources.
+Cite sources using [Source N] format throughout your response.""",
+
+    QueryType.SUMMARY: """You are a research assistant summarizing scientific literature.
+
+Based on the retrieved content, provide a comprehensive, structured summary covering:
+
+1. **Background & Context**: The research landscape and why this work matters
+2. **Key Findings**: Major results with specific data points and statistics
+3. **Methodology Highlights**: How key findings were obtained
+4. **Implications**: What these findings mean for the field
+5. **Connections**: How different findings relate to each other
+6. **Open Questions**: What remains to be addressed
+
+Organize the information logically and explain the significance of findings.
+Cite sources using [Source N] format throughout your response.""",
+
+    QueryType.COMPARATIVE: """You are a research analyst comparing approaches across the literature.
+
+Based on the retrieved sources, provide a thorough comparison covering:
+
+1. **Overview of Approaches**: Brief description of each approach/method being compared
+2. **Key Similarities**: What the approaches share in common
+3. **Important Differences**: Where they diverge and why
+4. **Trade-offs**: Advantages and disadvantages of each approach
+5. **Context-Dependent Recommendations**: When each approach might be preferred
+6. **Performance Metrics**: Quantitative comparisons where available
+7. **Practical Considerations**: Implementation complexity, resource requirements, etc.
+
+Use tables or structured formats where helpful for clarity.
+Cite sources using [Source N] format throughout your response.""",
+
+    QueryType.NOVELTY: """You are a research strategist assessing novelty and contribution.
+
+Based on the retrieved literature, provide a comprehensive assessment covering:
+
+1. **Prior Art Summary**: What has been done before in this area
+2. **Gap Analysis**: What hasn't been addressed or remains unresolved
+3. **Potential Novel Contributions**: Aspects that could be claimed as new
+4. **Strength of Novelty Claims**: How defensible each potential contribution is
+5. **Differentiation Strategy**: How to position work relative to existing literature
+6. **Risk Assessment**: Potential challenges to novelty claims
+7. **Supporting Evidence**: What evidence from literature supports your assessment
+
+Be specific about what has and hasn't been done, with citations.
+Cite sources using [Source N] format throughout your response.""",
+
+    QueryType.LIMITATIONS: """You are a research writing assistant helping discuss limitations.
+
+Based on how limitations are discussed in similar literature, provide comprehensive guidance on:
+
+1. **Common Limitations**: What limitations are typically acknowledged in this area
+2. **How to Frame Each Limitation**: Language and approaches that maintain credibility
+3. **Mitigation Strategies**: How papers address or contextualize their limitations
+4. **Balancing Act**: How to be honest without undermining your work
+5. **Field-Specific Conventions**: What's expected in this research area
+6. **Reviewer Anticipation**: Limitations reviewers are likely to raise
+7. **Future Work Connections**: How to turn limitations into future directions
+
+Include specific examples of effective limitation discussions from the sources.
+Cite sources using [Source N] format throughout your response.""",
+
+    QueryType.GENERAL: """You are a research assistant helping with questions about scientific literature.
+
+Based on the retrieved sources, provide a comprehensive and well-organized answer to the question.
+
+Structure your response to:
+- Address all aspects of the question thoroughly
+- Provide relevant background context
+- Include specific details, data points, and examples
+- Explain connections between different pieces of information
+- Note any important caveats or nuances
+- Suggest related topics or follow-up questions if relevant
+
+Draw on all relevant information from the sources.
+Cite sources using [Source N] format throughout your response.""",
+}
+
+# General knowledge addendum for when enable_general_knowledge is True
+GENERAL_KNOWLEDGE_ADDENDUM = """
+
+---
+IMPORTANT: General Knowledge Mode is ENABLED.
+
+In addition to the retrieved sources, you may draw on your general scientific knowledge to provide a more complete answer. However, you MUST follow this structure:
+
+**CRITICAL: ALWAYS start your response by answering based on the retrieved sources with [Source N] citations. NEVER skip the RAG citations.**
+
+1. FIRST: Answer the question using ONLY the retrieved sources. Cite every claim with [Source N] format.
+2. THEN: After fully addressing the question with source citations, you may add:
+
+## Additional Context (General Knowledge)
+
+In this section, clearly indicate that this information comes from your general training knowledge, not the uploaded papers. Use phrases like:
+- "Based on general scientific knowledge..."
+- "From broader literature (not in uploaded papers)..."
+- "General background that may be relevant..."
+
+This separation helps users distinguish between information from their specific papers vs. general knowledge."""
+
+# Web search system prompt - used for the separate web search call
+WEB_SEARCH_SYSTEM_PROMPT = """You are a helpful research assistant. Search the web for publicly available information related to the user's question. Focus on:
+- Recent publications and news
+- Educational resources
+- General background information
+
+Provide factual information with source URLs. This is for educational and research purposes."""
+
+# Legacy alias for backward compatibility
+SYSTEM_PROMPTS = SYSTEM_PROMPTS_CONCISE
 
 
 class QueryEngine:
@@ -294,6 +451,9 @@ class QueryEngine:
         enable_hyde_override: Optional[bool] = None,
         enable_expansion_override: Optional[bool] = None,
         enable_citation_check_override: Optional[bool] = None,
+        response_mode: str = "detailed",
+        enable_general_knowledge: bool = True,
+        enable_web_search: bool = False,
     ) -> QueryResult:
         """Execute the full query pipeline.
 
@@ -306,6 +466,9 @@ class QueryEngine:
             enable_hyde_override: Optional override for HyDE (None = use system default)
             enable_expansion_override: Optional override for query expansion (None = use system default)
             enable_citation_check_override: Optional override for citation verification (None = use system default)
+            response_mode: "concise" for brief answers, "detailed" for comprehensive responses
+            enable_general_knowledge: Whether to allow LLM to supplement with general knowledge
+            enable_web_search: Whether to allow Claude to search the web for additional context
 
         Returns:
             QueryResult with answer and sources
@@ -640,6 +803,10 @@ class QueryEngine:
             query_type=query_type,
             sources=expanded_sources,
             stream_callback=answer_stream_callback if progress_callback else None,
+            response_mode=response_mode,
+            enable_general_knowledge=enable_general_knowledge,
+            enable_web_search=enable_web_search,
+            progress_emitter=emit if progress_callback else None,
         )
         timing_generation_ms = (time.perf_counter() - timing_generation_start) * 1000
         emit("generation", {"status": "complete"})
@@ -887,6 +1054,10 @@ class QueryEngine:
         query_type: QueryType,
         sources: List[Dict[str, Any]],
         stream_callback: Optional[callable] = None,
+        response_mode: str = "detailed",
+        enable_general_knowledge: bool = True,
+        enable_web_search: bool = False,
+        progress_emitter: Optional[callable] = None,
     ) -> str:
         """Generate answer using Claude with query-type-specific prompt.
 
@@ -898,18 +1069,49 @@ class QueryEngine:
             query_type: Classification of the query type
             sources: Retrieved source documents
             stream_callback: Optional callback(chunk: str) for streaming response chunks
+            response_mode: "concise" for brief answers, "detailed" for comprehensive responses
+            enable_general_knowledge: Whether to allow LLM to supplement with general knowledge
+            enable_web_search: Whether to allow Claude to search the web
+            progress_emitter: Optional callback(step, data) for progress events
 
         Returns:
             Complete answer text
         """
+        # Log the received parameters
+        logger.info(f"_generate_answer called - response_mode: {response_mode}, enable_general_knowledge: {enable_general_knowledge}, enable_web_search: {enable_web_search}, query_type: {query_type}")
+
         if not sources:
-            return "I couldn't find relevant information in the literature to answer this question."
+            if enable_general_knowledge:
+                # Allow general knowledge response even without sources
+                logger.info("No sources but general knowledge enabled - proceeding with general knowledge response")
+                pass
+            else:
+                return "I couldn't find relevant information in the literature to answer this question."
 
         # Format sources
-        sources_text = self._format_sources(sources)
+        sources_text = self._format_sources(sources) if sources else ""
 
-        # Get query-type-specific system prompt
-        system_prompt = SYSTEM_PROMPTS.get(query_type, SYSTEM_PROMPTS[QueryType.FACTUAL])
+        # Get query-type-specific system prompt based on response mode
+        if response_mode == "detailed":
+            prompt_dict = SYSTEM_PROMPTS_DETAILED
+            max_tokens = 4096  # More tokens for detailed responses
+            logger.info(f"Using DETAILED prompts with max_tokens={max_tokens}")
+        else:
+            prompt_dict = SYSTEM_PROMPTS_CONCISE
+            max_tokens = 2048
+            logger.info(f"Using CONCISE prompts with max_tokens={max_tokens}")
+
+        system_prompt = prompt_dict.get(query_type, prompt_dict[QueryType.FACTUAL])
+
+        # Web search requires general knowledge to be enabled
+        if enable_web_search and not enable_general_knowledge:
+            logger.warning("Web search requires general knowledge - enabling general knowledge")
+            enable_general_knowledge = True
+
+        # Add general knowledge addendum if enabled (but NOT web search - that's done separately)
+        if enable_general_knowledge:
+            system_prompt += GENERAL_KNOWLEDGE_ADDENDUM
+            logger.info("Added GENERAL_KNOWLEDGE_ADDENDUM to system prompt")
 
         # Build messages array with conversation history
         messages = []
@@ -920,41 +1122,89 @@ class QueryEngine:
             messages.extend(history)
 
         # Add current query with retrieved sources
-        current_message = f"""Question: {query}
+        if sources:
+            current_message = f"""Question: {query}
 
-Retrieved Sources:
+Retrieved Sources from Uploaded Papers:
 {sources_text}
 
-Please provide your answer based on the sources above."""
+IMPORTANT: You MUST cite these sources using [Source N] format in your response. Start by answering the question using these sources with proper citations."""
+        else:
+            current_message = f"""Question: {query}
+
+No sources were retrieved from the uploaded papers. Please answer based on your general scientific knowledge, clearly indicating that this response comes from general knowledge rather than the uploaded papers."""
+
         messages.append({"role": "user", "content": current_message})
 
+        # Debug logging
+        logger.info(f"System prompt length: {len(system_prompt)} chars")
+        logger.info(f"Number of sources provided: {len(sources) if sources else 0}")
+        logger.info(f"Web search enabled: {enable_web_search}, General knowledge enabled: {enable_general_knowledge}")
+
         try:
+            # STEP 1: Generate RAG-based answer (no web search tool)
             if stream_callback:
-                # Use streaming API
+                # Use streaming API for RAG answer
                 full_response = []
-                with self.anthropic.messages.stream(
-                    model=self.claude_model,
-                    max_tokens=2048,
-                    temperature=0.3,
-                    system=system_prompt,
-                    messages=messages,
-                ) as stream:
+                stream_kwargs = {
+                    "model": self.claude_model,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.3,
+                    "system": system_prompt,
+                    "messages": messages,
+                }
+
+                with self.anthropic.messages.stream(**stream_kwargs) as stream:
                     for text in stream.text_stream:
                         full_response.append(text)
                         stream_callback(text)
-                return "".join(full_response)
+
+                rag_response = "".join(full_response)
+
+                # STEP 2: If web search is enabled, do a separate web search call
+                if enable_web_search and enable_general_knowledge:
+                    logger.info("Performing separate web search call")
+                    if progress_emitter:
+                        progress_emitter("web_search", {"status": "starting"})
+                    # Create progress callback for web search
+                    def web_search_progress(msg):
+                        if progress_emitter:
+                            progress_emitter("web_search_progress", {"message": msg})
+                    web_search_response = self._perform_web_search(query, stream_callback, web_search_progress)
+                    if progress_emitter:
+                        progress_emitter("web_search", {"status": "complete"})
+                    if web_search_response:
+                        rag_response += web_search_response
+
+                return rag_response
             else:
                 # Non-streaming fallback
                 def make_api_call():
-                    return self.anthropic.messages.create(
-                        model=self.claude_model,
-                        max_tokens=2048,
-                        temperature=0.3,
-                        system=system_prompt,
-                        messages=messages,
-                    )
+                    call_kwargs = {
+                        "model": self.claude_model,
+                        "max_tokens": max_tokens,
+                        "temperature": 0.3,
+                        "system": system_prompt,
+                        "messages": messages,
+                    }
+                    return self.anthropic.messages.create(**call_kwargs)
+
                 response = retry_with_exponential_backoff(make_api_call)
-                return response.content[0].text
+                # Handle response - extract text from content blocks
+                text_parts = []
+                for block in response.content:
+                    if hasattr(block, 'text'):
+                        text_parts.append(block.text)
+                rag_response = "".join(text_parts) if text_parts else ""
+
+                # STEP 2: If web search is enabled, do a separate web search call
+                if enable_web_search and enable_general_knowledge:
+                    logger.info("Performing separate web search call (non-streaming)")
+                    web_search_response = self._perform_web_search(query, None)
+                    if web_search_response:
+                        rag_response += web_search_response
+
+                return rag_response
 
         except (RateLimitError, APIStatusError) as e:
             logger.error(f"Answer generation failed after retries: {e}")
@@ -963,6 +1213,163 @@ Please provide your answer based on the sources above."""
         except Exception as e:
             logger.error(f"Answer generation failed: {e}")
             return f"Error generating answer: {str(e)}"
+
+    def _perform_web_search(
+        self,
+        query: str,
+        stream_callback: Optional[callable] = None,
+        progress_callback: Optional[callable] = None,
+    ) -> str:
+        """Perform a separate web search to supplement the RAG answer.
+
+        Args:
+            query: The original user query
+            stream_callback: Optional callback for streaming final answer
+            progress_callback: Optional callback for progress updates (search status)
+
+        Returns:
+            Web search results formatted as markdown, or empty string if no results
+        """
+        try:
+            # Stream the section header first
+            header = "\n\n---\n\n## Additional Context (Web Search)\n\n"
+            if stream_callback:
+                stream_callback(header)
+
+            # Simplify the query to avoid refusals - just ask for general info
+            # Truncate long queries to avoid issues
+            search_query = query[:500] if len(query) > 500 else query
+            web_search_messages = [{
+                "role": "user",
+                "content": f"Please search for recent information about: {search_query}"
+            }]
+
+            tools = [{"type": "web_search_20250305", "name": "web_search"}]
+
+            # Use non-streaming for web search since server-side tools have complex streaming behavior
+            # Use a faster model for web search since it's supplementary
+            logger.info(f"Starting web search for query: {search_query[:100]}...")
+
+            # Try with sonnet first (faster and less likely to refuse)
+            web_search_model = "claude-sonnet-4-20250514"
+            response = self.anthropic.messages.create(
+                model=web_search_model,
+                max_tokens=1024,
+                temperature=0.5,  # Slightly higher temp for more natural responses
+                system=WEB_SEARCH_SYSTEM_PROMPT,
+                messages=web_search_messages,
+                tools=tools,
+            )
+
+            logger.info(f"Web search response received, content blocks: {len(response.content)}, stop_reason: {response.stop_reason}, model: {response.model}")
+
+            # Handle refusal case
+            if response.stop_reason == 'refusal':
+                logger.warning(f"Web search was refused by Claude for query: {search_query[:100]}")
+                refusal_msg = "*Web search declined for this query. The AI determined it couldn't helpfully search for this specific topic.*"
+                if stream_callback:
+                    stream_callback(refusal_msg)
+                return header + refusal_msg
+
+            # Process content blocks - separate progress text from final answer
+            # Progress text: text before/between searches ("I'll search for...")
+            # Final answer: text with citations after all searches complete
+            final_text_parts = []
+            collected_urls = []  # Collect URLs from search results
+            found_search_result = False
+
+            for block in response.content:
+                block_type = type(block).__name__
+
+                if block_type == 'ServerToolUseBlock':
+                    # This is a search query - emit progress
+                    if hasattr(block, 'input') and isinstance(block.input, dict):
+                        search_query_text = block.input.get('query', '')
+                        if progress_callback and search_query_text:
+                            progress_callback(f"Searching: {search_query_text}")
+                        logger.info(f"Web search query: {search_query_text}")
+
+                elif block_type == 'WebSearchToolResultBlock':
+                    # This is search results - extract URLs
+                    found_search_result = True
+                    if hasattr(block, 'content'):
+                        for result in block.content:
+                            if hasattr(result, 'url') and hasattr(result, 'title'):
+                                collected_urls.append({
+                                    'url': result.url,
+                                    'title': result.title
+                                })
+
+                elif hasattr(block, 'text'):
+                    text = block.text.strip()
+                    if not text:
+                        continue
+
+                    # Filter out progress/thinking text
+                    # These patterns indicate Claude is explaining what it's doing rather than answering
+                    progress_patterns = (
+                        "i'll search", "let me search", "now let me", "i will search",
+                        "searching for", "i'll look", "let me look", "i'll find",
+                        "let me find", "now i'll", "now i will", "i need to search",
+                        "based on my search", "i can now provide", "i found"
+                    )
+                    is_progress = text.lower().startswith(progress_patterns)
+
+                    if is_progress:
+                        # This is progress text - emit to progress callback but don't include in result
+                        if progress_callback:
+                            progress_callback(text)
+                        logger.debug(f"Web search progress (filtered): {text[:100]}")
+                    else:
+                        # This is final answer text - include in result
+                        # Check for citations
+                        if hasattr(block, 'citations') and block.citations:
+                            # Append inline citations
+                            for citation in block.citations:
+                                if hasattr(citation, 'url') and hasattr(citation, 'title'):
+                                    collected_urls.append({
+                                        'url': citation.url,
+                                        'title': citation.title
+                                    })
+                        final_text_parts.append(text)
+
+            # Build final result with URL references
+            if final_text_parts:
+                final_text = " ".join(final_text_parts)
+
+                # Add sources section if we have URLs
+                if collected_urls:
+                    # Deduplicate URLs
+                    seen_urls = set()
+                    unique_urls = []
+                    for url_info in collected_urls:
+                        if url_info['url'] not in seen_urls:
+                            seen_urls.add(url_info['url'])
+                            unique_urls.append(url_info)
+
+                    if unique_urls:
+                        final_text += "\n\n**Sources:**\n"
+                        for url_info in unique_urls[:5]:  # Limit to 5 sources
+                            final_text += f"- [{url_info['title']}]({url_info['url']})\n"
+
+                result = header + final_text
+                if stream_callback:
+                    stream_callback(final_text)
+                logger.info(f"Web search returned {len(result)} chars with {len(collected_urls)} URLs")
+                return result
+            else:
+                logger.warning("Web search returned no final answer text")
+                no_results_msg = "*No additional web results found for this query.*"
+                if stream_callback:
+                    stream_callback(no_results_msg)
+                return header + no_results_msg
+
+        except Exception as e:
+            logger.error(f"Web search failed: {e}", exc_info=True)
+            error_msg = f"\n\n*Web search unavailable: {str(e)}*"
+            if stream_callback:
+                stream_callback(error_msg)
+            return header + error_msg
 
     def _format_sources(self, sources: List[Dict[str, Any]]) -> str:
         """Format sources for the prompt."""

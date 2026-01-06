@@ -57,8 +57,8 @@ class MinerUContent:
 class MinerUExtractor:
     """Extract content from PDFs using MinerU."""
 
-    # Default timeout for PDF extraction (5 minutes)
-    DEFAULT_TIMEOUT = 300
+    # Default timeout for PDF extraction (15 minutes - then fallback to simple extraction)
+    DEFAULT_TIMEOUT = 900
 
     def __init__(self, use_gpu: bool = True, lang: str = "en", timeout: int = DEFAULT_TIMEOUT):
         """Initialize MinerU extractor.
@@ -105,11 +105,8 @@ class MinerUExtractor:
                 try:
                     return future.result(timeout=self.timeout)
                 except FuturesTimeoutError:
-                    logger.error(f"MinerU extraction timed out after {self.timeout}s for {pdf_path.name}")
-                    raise TimeoutError(f"PDF extraction timed out after {self.timeout} seconds")
-        except TimeoutError:
-            # Re-raise timeout errors to be caught by caller
-            raise
+                    logger.warning(f"MinerU extraction timed out after {self.timeout}s for {pdf_path.name}, using fallback")
+                    return self._fallback_extract(pdf_path)
         except Exception as e:
             logger.warning(f"MinerU extraction failed, falling back: {e}")
             return self._fallback_extract(pdf_path)
@@ -173,6 +170,14 @@ class MinerUExtractor:
                 metadata=metadata
             )
 
+    def _sanitize_text(self, text: str) -> str:
+        """Remove invalid Unicode characters that can't be encoded to JSON.
+
+        Handles surrogate characters and other problematic Unicode.
+        """
+        # Encode to utf-8, replacing errors, then decode back
+        return text.encode('utf-8', errors='replace').decode('utf-8')
+
     def _extract_text_from_content(self, content_list: List) -> str:
         """Extract plain text from MinerU content list."""
         text_parts = []
@@ -187,7 +192,7 @@ class MinerUExtractor:
             elif isinstance(item, str):
                 text_parts.append(item)
 
-        return "\n".join(text_parts)
+        return self._sanitize_text("\n".join(text_parts))
 
     def _extract_tables_from_content(self, content_list: List) -> List[str]:
         """Extract tables from MinerU content list."""
@@ -479,7 +484,8 @@ class EnhancedPDFProcessor:
         abstract_max_tokens: int = 300,
         section_max_tokens: int = 2000,
         fine_chunk_tokens: int = 500,
-        fine_chunk_overlap: int = 128,        extraction_timeout: int = 300,
+        fine_chunk_overlap: int = 128,
+        extraction_timeout: int = 900,
     ):
         """Initialize enhanced processor.
 
@@ -488,7 +494,7 @@ class EnhancedPDFProcessor:
             section_max_tokens: Max tokens per section
             fine_chunk_tokens: Target tokens for fine chunks
             fine_chunk_overlap: Overlap between fine chunks
-            extraction_timeout: Max seconds for PDF extraction (default: 300)
+            extraction_timeout: Max seconds for PDF extraction (default: 900)
         """
         self.chunker = PaperChunker(
             abstract_max_tokens=abstract_max_tokens,

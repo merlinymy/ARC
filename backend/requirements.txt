@@ -9,8 +9,8 @@ voyageai>=0.2.0,<1.0.0
 cohere>=5.0.0,<6.0.0
 
 # PDF Processing (MinerU replaces marker-pdf, pymupdf, pdfplumber, camelot-py)
-mineru[core]>=0.1.0
-
+mineru[core]
+torch
 # Vector Database
 qdrant-client>=1.7.0,<2.0.0
 

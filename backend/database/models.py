@@ -38,6 +38,9 @@ class User(Base):
     memories: Mapped[list["UserMemory"]] = relationship(
         "UserMemory", back_populates="user", cascade="all, delete-orphan"
     )
+    preferences: Mapped[Optional["UserPreferences"]] = relationship(
+        "UserPreferences", back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
 
 
 class Conversation(Base):
@@ -132,3 +135,32 @@ class UploadTask(Base):
     )
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class UserPreferences(Base):
+    """User preferences for query options."""
+
+    __tablename__ = "user_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    # Query options
+    query_type: Mapped[str] = mapped_column(String(20), default="auto")
+    top_k: Mapped[int] = mapped_column(Integer, default=15)
+    temperature: Mapped[float] = mapped_column(default=0.3)
+    max_chunks_per_paper: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # None = auto
+    response_mode: Mapped[str] = mapped_column(String(20), default="detailed")
+    enable_hyde: Mapped[bool] = mapped_column(default=True)
+    enable_expansion: Mapped[bool] = mapped_column(default=True)
+    enable_citation_check: Mapped[bool] = mapped_column(default=True)
+    enable_general_knowledge: Mapped[bool] = mapped_column(default=True)
+    enable_web_search: Mapped[bool] = mapped_column(default=False)
+    # Timestamps
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="preferences")

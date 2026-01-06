@@ -814,6 +814,16 @@ async def query_papers_stream(
             }
             yield f"data: {json.dumps(final_data)}\n\n"
 
+            # Emit separate web search event if available
+            if result.web_search_answer:
+                web_search_data = {
+                    "type": "web_search",
+                    "answer": result.web_search_answer,
+                    "sources": result.web_search_sources,
+                    "question": request.question,
+                }
+                yield f"data: {json.dumps(web_search_data)}\n\n"
+
             # Persist messages to database if conversation_id is provided
             if request.conversation_id and current_user:
                 try:
@@ -852,6 +862,19 @@ async def query_papers_stream(
                             "citationChecks": citation_checks,
                         }
                     )
+
+                    # Save web search as separate assistant message if available
+                    if result.web_search_answer:
+                        await chat_service.add_message(
+                            conversation_id=request.conversation_id,
+                            user_id=current_user.id,
+                            role="assistant",
+                            content=result.web_search_answer,
+                            metadata={
+                                "message_type": "web_search",
+                                "sources": result.web_search_sources,
+                            }
+                        )
                 except Exception as e:
                     # Log but don't fail the stream if message persistence fails
                     logger.warning(f"Failed to persist chat messages: {e}")

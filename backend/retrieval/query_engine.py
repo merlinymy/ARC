@@ -135,6 +135,9 @@ class QueryResult:
     warnings: List[str] = field(default_factory=list)
     # Citation verification details for inline display
     citation_checks: List[CitationCheckResult] = field(default_factory=list)
+    # Web search results (separate from RAG answer)
+    web_search_answer: str = ""
+    web_search_sources: List[Dict[str, str]] = field(default_factory=list)
 
 
 # Query-type-specific system prompts with concise and detailed variants
@@ -880,6 +883,7 @@ class QueryEngine:
         # Use user-specified temperature or default to 0.3
         effective_temperature = temperature if temperature is not None else 0.3
 
+        # STEP 1: Generate RAG answer first
         answer = self._generate_answer(
             query=query,
             query_type=query_type,
@@ -895,6 +899,38 @@ class QueryEngine:
         timing_generation_ms = (time.perf_counter() - timing_generation_start) * 1000
         emit("generation", {"status": "complete"})
         emit("answer_complete", {"answer": answer})
+
+        # STEP 2: Start web search immediately after RAG completes (same thread, streams properly)
+        web_search_answer = ""
+        web_search_sources = []
+
+        if enable_web_search and enable_general_knowledge:
+            logger.info("Starting web search after RAG completion")
+            emit("web_search", {"status": "starting"})
+
+            # Create progress callback for web search
+            def web_search_progress(msg):
+                emit("web_search_progress", {"message": msg})
+
+            # Create stream callback for web search text chunks
+            def web_search_stream(chunk):
+                logger.info(f"[STREAMING] Emitting web_search_chunk: {len(chunk)} chars")
+                emit("web_search_chunk", {"chunk": chunk})
+
+            try:
+                web_search_answer, web_search_sources = self._perform_web_search(
+                    query=query,
+                    stream_callback=web_search_stream if progress_callback else None,
+                    progress_callback=web_search_progress,
+                    custom_prompts=custom_prompts,
+                )
+                emit("web_search", {"status": "complete"})
+                logger.info(f"Web search completed: {len(web_search_answer)} chars, {len(web_search_sources)} sources")
+            except Exception as e:
+                logger.error(f"Web search failed: {e}", exc_info=True)
+                web_search_answer = f"*Web search failed: {str(e)}*"
+                web_search_sources = []
+                emit("web_search", {"status": "error", "error": str(e)})
 
         # Flush streaming verifier to catch any remaining citations
         if streaming_verifier:
@@ -1054,6 +1090,8 @@ class QueryEngine:
             entities_extracted=entities_extracted,
             warnings=warnings,
             citation_checks=citation_checks,
+            web_search_answer=web_search_answer,
+            web_search_sources=web_search_sources,
         )
 
     def _detect_targeted_query_type(self, query: str) -> QueryType:
@@ -1185,10 +1223,10 @@ class QueryEngine:
 
         # Set max tokens based on response mode
         if response_mode == "detailed":
-            max_tokens = 4096  # More tokens for detailed responses
+            max_tokens = 32768  # More tokens for detailed responses
             logger.info(f"Using DETAILED prompt (custom={is_custom}) with max_tokens={max_tokens}")
         else:
-            max_tokens = 2048
+            max_tokens = 16384
             logger.info(f"Using CONCISE prompt (custom={is_custom}) with max_tokens={max_tokens}")
 
         # Web search requires general knowledge to be enabled
@@ -1250,21 +1288,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
 
                 rag_response = "".join(full_response)
 
-                # STEP 2: If web search is enabled, do a separate web search call
-                if enable_web_search and enable_general_knowledge:
-                    logger.info("Performing separate web search call")
-                    if progress_emitter:
-                        progress_emitter("web_search", {"status": "starting"})
-                    # Create progress callback for web search
-                    def web_search_progress(msg):
-                        if progress_emitter:
-                            progress_emitter("web_search_progress", {"message": msg})
-                    web_search_response = self._perform_web_search(query, stream_callback, web_search_progress, custom_prompts)
-                    if progress_emitter:
-                        progress_emitter("web_search", {"status": "complete"})
-                    if web_search_response:
-                        rag_response += web_search_response
-
+                # Web search is now handled separately in the query() method
                 return rag_response
             else:
                 # Non-streaming fallback
@@ -1286,13 +1310,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
                         text_parts.append(block.text)
                 rag_response = "".join(text_parts) if text_parts else ""
 
-                # STEP 2: If web search is enabled, do a separate web search call
-                if enable_web_search and enable_general_knowledge:
-                    logger.info("Performing separate web search call (non-streaming)")
-                    web_search_response = self._perform_web_search(query, None, None, custom_prompts)
-                    if web_search_response:
-                        rag_response += web_search_response
-
+                # Web search is now handled separately in the query() method
                 return rag_response
 
         except (RateLimitError, APIStatusError) as e:
@@ -1309,83 +1327,92 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
         stream_callback: Optional[callable] = None,
         progress_callback: Optional[callable] = None,
         custom_prompts: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """Perform a separate web search to supplement the RAG answer.
+    ) -> tuple[str, List[Dict[str, str]]]:
+        """Perform a separate web search using Anthropic's server-side web_search tool.
 
         Args:
             query: The original user query
-            stream_callback: Optional callback for streaming final answer
+            stream_callback: Optional callback for streaming answer text chunks
             progress_callback: Optional callback for progress updates (search status)
             custom_prompts: Optional dict of custom system prompts from user preferences
 
         Returns:
-            Web search results formatted as markdown, or empty string if no results
+            Tuple of (answer_text, sources_list) where sources_list contains dicts with 'url' and 'title' keys
         """
         try:
-            # Stream the section header first
-            header = "\n\n---\n\n## Additional Context (Web Search)\n\n"
-            if stream_callback:
-                stream_callback(header)
-
-            # Simplify the query to avoid refusals - just ask for general info
-            # Truncate long queries to avoid issues
+            # Simplify the query to avoid refusals
             search_query = query[:500] if len(query) > 500 else query
-            web_search_messages = [{
-                "role": "user",
-                "content": f"Please search for recent information about: {search_query}"
-            }]
-
-            tools = [{"type": "web_search_20250305", "name": "web_search"}]
-
-            # Use non-streaming for web search since server-side tools have complex streaming behavior
-            # Use a faster model for web search since it's supplementary
-            logger.info(f"Starting web search for query: {search_query[:100]}...")
 
             # Get web search system prompt (using custom if available)
             web_search_prompt = get_effective_addendum("web_search", custom_prompts)
 
-            # Try with sonnet first (faster and less likely to refuse)
+            # Use sonnet for web search (good balance of speed and quality)
             web_search_model = "claude-sonnet-4-5-20250929"
-            response = self.anthropic.messages.create(
+
+            logger.info(f"Starting web search with streaming for query: {search_query[:100]}...")
+
+            # Prepare the web search tool definition
+            tools = [{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 5
+            }]
+
+            # Messages for the web search
+            web_search_messages = [{
+                "role": "user",
+                "content": f"Search the web and provide information about: {search_query}\n\nProvide a comprehensive answer with proper citations."
+            }]
+
+            # Track collected data
+            collected_text_chunks = []
+            collected_urls = []
+
+            # Use the streaming API with text_stream helper
+            with self.anthropic.messages.stream(
                 model=web_search_model,
-                max_tokens=1024,
-                temperature=0.5,  # Slightly higher temp for more natural responses
+                max_tokens=32768,
+                temperature=0.5,
                 system=web_search_prompt,
                 messages=web_search_messages,
                 tools=tools,
-            )
+            ) as stream:
+                # Collect all streamed text first
+                for text in stream.text_stream:
+                    logger.info(f"[TEXT STREAM] Received {len(text)} chars")
+                    collected_text_chunks.append(text)
+                    # Stream everything in real-time
+                    if stream_callback:
+                        stream_callback(text)
 
-            logger.info(f"Web search response received, content blocks: {len(response.content)}, stop_reason: {response.stop_reason}, model: {response.model}")
+                # After stream completes, get the final message
+                final_message = stream.get_final_message()
+
+            logger.info(f"Web search response received, content blocks: {len(final_message.content)}, stop_reason: {final_message.stop_reason}")
 
             # Handle refusal case
-            if response.stop_reason == 'refusal':
+            if final_message.stop_reason == 'refusal':
                 logger.warning(f"Web search was refused by Claude for query: {search_query[:100]}")
                 refusal_msg = "*Web search declined for this query. The AI determined it couldn't helpfully search for this specific topic.*"
-                if stream_callback:
-                    stream_callback(refusal_msg)
-                return header + refusal_msg
+                return (refusal_msg, [])
 
-            # Process content blocks - separate progress text from final answer
-            # Progress text: text before/between searches ("I'll search for...")
-            # Final answer: text with citations after all searches complete
-            final_text_parts = []
-            collected_urls = []  # Collect URLs from search results
-            found_search_result = False
+            # Extract URLs and identify which text blocks are answer vs progress
+            # Structure: [Text (thinking)] -> [ToolUse] -> [ToolResult] -> [Text (answer with citations)]
+            tool_result_index = -1
+            answer_text_blocks = []
 
-            for block in response.content:
+            for i, block in enumerate(final_message.content):
                 block_type = type(block).__name__
+                logger.debug(f"Processing block {i}: {block_type}")
 
                 if block_type == 'ServerToolUseBlock':
-                    # This is a search query - emit progress
                     if hasattr(block, 'input') and isinstance(block.input, dict):
                         search_query_text = block.input.get('query', '')
-                        if progress_callback and search_query_text:
-                            progress_callback(f"Searching: {search_query_text}")
-                        logger.info(f"Web search query: {search_query_text}")
+                        logger.info(f"Web search executed query: {search_query_text}")
 
                 elif block_type == 'WebSearchToolResultBlock':
-                    # This is search results - extract URLs
-                    found_search_result = True
+                    tool_result_index = i
+                    # Extract URLs from search results
                     if hasattr(block, 'content'):
                         for result in block.content:
                             if hasattr(result, 'url') and hasattr(result, 'title'):
@@ -1393,78 +1420,57 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
                                     'url': result.url,
                                     'title': result.title
                                 })
+                                logger.debug(f"Found search result: {result.title}")
 
-                elif hasattr(block, 'text'):
-                    text = block.text.strip()
-                    if not text:
-                        continue
+                elif block_type == 'TextBlock':
+                    text = block.text if hasattr(block, 'text') else ''
+                    has_citations = hasattr(block, 'citations') and block.citations
 
-                    # Filter out progress/thinking text
-                    # These patterns indicate Claude is explaining what it's doing rather than answering
-                    progress_patterns = (
-                        "i'll search", "let me search", "now let me", "i will search",
-                        "searching for", "i'll look", "let me look", "i'll find",
-                        "let me find", "now i'll", "now i will", "i need to search",
-                        "based on my search", "i can now provide", "i found"
-                    )
-                    is_progress = text.lower().startswith(progress_patterns)
+                    # Text blocks AFTER tool results = answer content (keep)
+                    # Text blocks with citations = answer content (keep)
+                    # Text blocks BEFORE tool results without citations = thinking (discard)
+                    is_answer = (tool_result_index >= 0 and i > tool_result_index) or has_citations
 
-                    if is_progress:
-                        # This is progress text - emit to progress callback but don't include in result
-                        if progress_callback:
-                            progress_callback(text)
-                        logger.debug(f"Web search progress (filtered): {text[:100]}")
+                    if is_answer:
+                        answer_text_blocks.append(text)
+                        logger.debug(f"Answer text block ({len(text)} chars): {text[:100]}")
                     else:
-                        # This is final answer text - include in result
-                        # Check for citations
-                        if hasattr(block, 'citations') and block.citations:
-                            # Append inline citations
-                            for citation in block.citations:
-                                if hasattr(citation, 'url') and hasattr(citation, 'title'):
-                                    collected_urls.append({
-                                        'url': citation.url,
-                                        'title': citation.title
-                                    })
-                        final_text_parts.append(text)
+                        logger.debug(f"Progress text block (discarded): {text[:100]}")
 
-            # Build final result with URL references
-            if final_text_parts:
-                # Join with double newlines to preserve markdown block structure (headers, paragraphs, lists)
-                final_text = "\n\n".join(final_text_parts)
+                    # Extract citations from text blocks
+                    if has_citations:
+                        for citation in block.citations:
+                            if hasattr(citation, 'url') and hasattr(citation, 'title'):
+                                collected_urls.append({
+                                    'url': citation.url,
+                                    'title': citation.title
+                                })
+                                logger.debug(f"Found citation: {citation.title}")
 
-                # Add sources section if we have URLs
-                if collected_urls:
-                    # Deduplicate URLs
-                    seen_urls = set()
-                    unique_urls = []
-                    for url_info in collected_urls:
-                        if url_info['url'] not in seen_urls:
-                            seen_urls.add(url_info['url'])
-                            unique_urls.append(url_info)
+            # Build final result from answer text blocks only (not all streamed text)
+            final_text = "".join(answer_text_blocks).strip()
+            logger.info(f"Building final result: {len(final_text)} chars of text, {len(collected_urls)} URLs collected")
 
-                    if unique_urls:
-                        final_text += "\n\n**Sources:**\n"
-                        for url_info in unique_urls[:5]:  # Limit to 5 sources
-                            final_text += f"- [{url_info['title']}]({url_info['url']})\n"
+            if final_text:
+                # Deduplicate URLs
+                seen_urls = set()
+                unique_urls = []
+                for url_info in collected_urls:
+                    if url_info['url'] not in seen_urls:
+                        seen_urls.add(url_info['url'])
+                        unique_urls.append(url_info)
 
-                result = header + final_text
-                if stream_callback:
-                    stream_callback(final_text)
-                logger.info(f"Web search returned {len(result)} chars with {len(collected_urls)} URLs")
-                return result
+                logger.info(f"Web search SUCCESS: Returning {len(final_text)} chars with {len(unique_urls)} unique URLs")
+                return (final_text, unique_urls[:10])  # Limit to 10 sources
             else:
-                logger.warning("Web search returned no final answer text")
+                logger.warning(f"Web search returned no answer text (but found {len(collected_urls)} URLs)")
                 no_results_msg = "*No additional web results found for this query.*"
-                if stream_callback:
-                    stream_callback(no_results_msg)
-                return header + no_results_msg
+                return (no_results_msg, [])
 
         except Exception as e:
             logger.error(f"Web search failed: {e}", exc_info=True)
-            error_msg = f"\n\n*Web search unavailable: {str(e)}*"
-            if stream_callback:
-                stream_callback(error_msg)
-            return header + error_msg
+            error_msg = f"*Web search unavailable: {str(e)}*"
+            return (error_msg, [])
 
     def _format_sources(self, sources: List[Dict[str, Any]]) -> str:
         """Format sources for the prompt."""

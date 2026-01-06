@@ -616,8 +616,8 @@ class QueryEngine:
             # Format sources for verification (need 'text' and 'title' keys)
             verification_sources = [
                 {
-                    'text': s.get('chunk_text', ''),
-                    'title': s.get('paper_title', f'Source {i+1}'),
+                    'text': s.get('text', ''),
+                    'title': s.get('title', f'Source {i+1}'),
                 }
                 for i, s in enumerate(expanded_sources)
             ]
@@ -665,8 +665,8 @@ class QueryEngine:
                 logger.debug(f"Final pass: verifying {len(missing_ids)} missed citations: {missing_ids}")
                 verification_sources = [
                     {
-                        'text': s.get('chunk_text', ''),
-                        'title': s.get('paper_title', f'Source {i+1}'),
+                        'text': s.get('text', ''),
+                        'title': s.get('title', f'Source {i+1}'),
                     }
                     for i, s in enumerate(expanded_sources)
                 ]

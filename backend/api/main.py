@@ -504,6 +504,18 @@ async def query_papers(
                 relevance_score=source.get('score', 0.0),
             ))
 
+        # Convert citation checks to API format
+        citation_checks = [
+            CitationCheck(
+                citation_id=c.citation_id,
+                claim=c.claim,
+                confidence=c.confidence,
+                is_valid=c.is_valid,
+                explanation=c.explanation,
+            )
+            for c in result.citation_checks
+        ]
+
         # Persist messages to database if conversation_id is provided
         if request.conversation_id and current_user:
             try:
@@ -539,23 +551,12 @@ async def query_papers(
                         "sources": [s.model_dump() for s in sources],
                         "retrieval_count": result.retrieval_count,
                         "reranked_count": result.reranked_count,
+                        "citationChecks": [c.model_dump() for c in citation_checks],
                     }
                 )
             except Exception as e:
                 # Log but don't fail the request if message persistence fails
                 logger.warning(f"Failed to persist chat messages: {e}")
-
-        # Convert citation checks to API format
-        citation_checks = [
-            CitationCheck(
-                citation_id=c.citation_id,
-                claim=c.claim,
-                confidence=c.confidence,
-                is_valid=c.is_valid,
-                explanation=c.explanation,
-            )
-            for c in result.citation_checks
-        ]
 
         return QueryResponse(
             answer=result.answer,
@@ -724,6 +725,7 @@ async def query_papers_stream(
                             "sources": sources,
                             "retrieval_count": result.retrieval_count,
                             "reranked_count": result.reranked_count,
+                            "citationChecks": citation_checks,
                         }
                     )
                 except Exception as e:

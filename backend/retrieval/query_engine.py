@@ -422,7 +422,7 @@ class QueryEngine:
         anthropic_client: Anthropic,
         claude_model: str = "claude-opus-4-5-20251101",
         claude_model_fast: str = "claude-3-haiku-20240307",
-        claude_model_classifier: str = "claude-sonnet-4-20250514",
+        claude_model_classifier: str = "claude-sonnet-4-5-20250929",
         enable_classification: bool = True,
         enable_expansion: bool = True,
         # New options for advanced features
@@ -1345,7 +1345,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
             web_search_prompt = get_effective_addendum("web_search", custom_prompts)
 
             # Try with sonnet first (faster and less likely to refuse)
-            web_search_model = "claude-sonnet-4-20250514"
+            web_search_model = "claude-sonnet-4-5-20250929"
             response = self.anthropic.messages.create(
                 model=web_search_model,
                 max_tokens=1024,

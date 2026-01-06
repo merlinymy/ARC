@@ -203,7 +203,7 @@ class QueryClassifier:
     def __init__(
         self,
         anthropic_client: Anthropic,
-        model: str = "claude-sonnet-4-20250514"
+        model: str = "claude-sonnet-4-5-20250929"
     ):
         """Initialize classifier.
 

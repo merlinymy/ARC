@@ -446,6 +446,8 @@ class QueryEngine:
         query: str,
         paper_ids: Optional[List[str]] = None,
         max_chunks_per_paper: Optional[int] = None,
+        top_k: Optional[int] = None,
+        temperature: Optional[float] = None,
         progress_callback: Optional[callable] = None,
         query_type_override: Optional[str] = None,
         enable_hyde_override: Optional[bool] = None,
@@ -461,6 +463,8 @@ class QueryEngine:
             query: User query
             paper_ids: Optional list of paper IDs to limit search to
             max_chunks_per_paper: Optional user-specified max chunks per paper (None = auto)
+            top_k: Optional user-specified number of results to retrieve (None = use strategy default)
+            temperature: Optional user-specified LLM temperature (None = use default 0.3)
             progress_callback: Optional callback(step_name, step_data) for real-time progress
             query_type_override: Optional query type override (skips classification if provided)
             enable_hyde_override: Optional override for HyDE (None = use system default)
@@ -609,16 +613,27 @@ class QueryEngine:
         # Step 5: Get retrieval strategy
         strategy = RETRIEVAL_STRATEGIES[query_type]
         chunk_types = strategy["chunk_types"]
-        top_k = strategy["top_k"]
+        strategy_top_k = strategy["top_k"]
         rerank_top_n = strategy["rerank_top_n"]
         max_per_paper = strategy.get("max_per_paper", 3)
         section_filter = strategy.get("section_filter")
 
+        # User-specified top_k controls the FINAL output count (rerank_top_n), not retrieval
+        # Retrieval should cast a wider net to ensure good reranking candidates
+        if top_k is not None:
+            rerank_top_n = top_k
+            # Ensure retrieval gets enough candidates for reranking (at least 2x the final count)
+            effective_top_k = max(strategy_top_k, top_k * 2)
+            logger.debug(f"User-specified top_k={top_k} -> rerank_top_n={rerank_top_n}, retrieval={effective_top_k}")
+        else:
+            effective_top_k = strategy_top_k
+
         # User-specified max_chunks_per_paper takes priority
         if max_chunks_per_paper is not None:
             max_per_paper = max_chunks_per_paper
-            # Also adjust rerank_top_n to ensure we have enough candidates
-            rerank_top_n = max(rerank_top_n, max_per_paper + 5)
+            # Only adjust rerank_top_n if user didn't explicitly set top_k
+            if top_k is None:
+                rerank_top_n = max(rerank_top_n, max_per_paper + 5)
             logger.debug(f"User-specified max_chunks_per_paper={max_per_paper}")
         elif paper_ids:
             # Auto mode: Override max_per_paper when specific papers are selected
@@ -627,11 +642,14 @@ class QueryEngine:
             if num_papers == 1:
                 # Single paper focus - allow many chunks for comprehensive analysis
                 max_per_paper = 25
-                rerank_top_n = min(rerank_top_n * 2, 30)
+                # Only adjust rerank_top_n if user didn't explicitly set top_k
+                if top_k is None:
+                    rerank_top_n = min(rerank_top_n * 2, 30)
             elif num_papers <= 3:
                 # Few papers - allow more chunks per paper
                 max_per_paper = 15
-                rerank_top_n = min(rerank_top_n + 10, 30)
+                if top_k is None:
+                    rerank_top_n = min(rerank_top_n + 10, 30)
             else:
                 # Multiple papers but still filtered - moderate increase
                 max_per_paper = max(max_per_paper, 8)
@@ -679,7 +697,7 @@ class QueryEngine:
                 results = self.store.hybrid_search(
                     query=expanded_query,
                     query_embedding=query_embedding,
-                    limit=top_k,
+                    limit=effective_top_k,
                     chunk_types=chunk_types,
                     section_names=section_filter,
                     paper_ids=paper_ids,
@@ -689,7 +707,7 @@ class QueryEngine:
                 results = self.store.search_by_strategy(
                     query_embedding=query_embedding,
                     chunk_types=chunk_types,
-                    top_k=top_k,
+                    top_k=effective_top_k,
                     section_filter=section_filter,
                     paper_ids=paper_ids,
                 )
@@ -798,6 +816,9 @@ class QueryEngine:
             if streaming_verifier:
                 streaming_verifier.process_chunk(chunk)
 
+        # Use user-specified temperature or default to 0.3
+        effective_temperature = temperature if temperature is not None else 0.3
+
         answer = self._generate_answer(
             query=query,
             query_type=query_type,
@@ -807,6 +828,7 @@ class QueryEngine:
             enable_general_knowledge=enable_general_knowledge,
             enable_web_search=enable_web_search,
             progress_emitter=emit if progress_callback else None,
+            temperature=effective_temperature,
         )
         timing_generation_ms = (time.perf_counter() - timing_generation_start) * 1000
         emit("generation", {"status": "complete"})
@@ -1058,6 +1080,7 @@ class QueryEngine:
         enable_general_knowledge: bool = True,
         enable_web_search: bool = False,
         progress_emitter: Optional[callable] = None,
+        temperature: float = 0.3,
     ) -> str:
         """Generate answer using Claude with query-type-specific prompt.
 
@@ -1073,6 +1096,7 @@ class QueryEngine:
             enable_general_knowledge: Whether to allow LLM to supplement with general knowledge
             enable_web_search: Whether to allow Claude to search the web
             progress_emitter: Optional callback(step, data) for progress events
+            temperature: LLM temperature for response generation (default 0.3)
 
         Returns:
             Complete answer text
@@ -1149,7 +1173,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
                 stream_kwargs = {
                     "model": self.claude_model,
                     "max_tokens": max_tokens,
-                    "temperature": 0.3,
+                    "temperature": temperature,
                     "system": system_prompt,
                     "messages": messages,
                 }
@@ -1183,7 +1207,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
                     call_kwargs = {
                         "model": self.claude_model,
                         "max_tokens": max_tokens,
-                        "temperature": 0.3,
+                        "temperature": temperature,
                         "system": system_prompt,
                         "messages": messages,
                     }

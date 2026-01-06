@@ -561,13 +561,15 @@ async def query_papers(
     """
     try:
         # Log received query options
-        logger.info(f"Query request received - response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
+        logger.info(f"Query request received - top_k: {request.top_k}, temperature: {request.temperature}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
 
         # Use the full QueryEngine pipeline
         result = query_engine.query(
             request.question,
             paper_ids=request.paper_ids,
             max_chunks_per_paper=request.max_chunks_per_paper,
+            top_k=request.top_k,
+            temperature=request.temperature,
             query_type_override=request.query_type,
             enable_hyde_override=request.enable_hyde,
             enable_expansion_override=request.enable_expansion,
@@ -689,7 +691,7 @@ async def query_papers_stream(
     persisted to the database for chat history.
     """
     # Log received query options for streaming endpoint
-    logger.info(f"Stream query request - response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
+    logger.info(f"Stream query request - top_k: {request.top_k}, temperature: {request.temperature}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
 
     async def event_generator():
         progress_events = []
@@ -709,6 +711,8 @@ async def query_papers_stream(
                     request.question,
                     paper_ids=request.paper_ids,
                     max_chunks_per_paper=request.max_chunks_per_paper,
+                    top_k=request.top_k,
+                    temperature=request.temperature,
                     progress_callback=progress_callback,
                     query_type_override=request.query_type,
                     enable_hyde_override=request.enable_hyde,

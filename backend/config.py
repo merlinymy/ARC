@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     # Paths - pdf_source_dir is optional to allow app startup without indexing
     pdf_source_dir: Optional[Path] = Field(default=None, description="Directory containing PDF files to index")
     processed_data_dir: Path = Path("./processed_data")
-    upload_dir: Path = Field(default=Path("./uploads"), description="Directory for uploaded PDF files")
+    upload_dir: Path = Field(default=Path("/Volumes/ARC/ARC/papers"), description="Directory for uploaded PDF files")
 
     # Upload settings
     max_upload_size_mb: int = Field(default=50, description="Maximum upload file size in MB")

@@ -1,6 +1,7 @@
 # Deployment Guide: Mac Mini Backend + Vercel Frontend
 
 This guide covers deploying:
+
 - **Backend + Qdrant** on your local Mac Mini
 - **Frontend** on Vercel
 
@@ -85,6 +86,7 @@ LOG_LEVEL=INFO
 ```
 
 Generate a secure JWT secret:
+
 ```bash
 openssl rand -hex 32
 ```
@@ -111,12 +113,14 @@ mkdir -p data processed_data uploads
 ### Step 1.6: Run the Backend
 
 For testing:
+
 ```bash
 source venv/bin/activate
-python -m uvicorn backend.api.main:app --host 0.0.0.0 --port 8000
+ python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 
 Verify it works:
+
 ```bash
 curl http://localhost:8000/health/quick
 ```
@@ -170,6 +174,7 @@ Add this content (adjust paths to your setup):
 ```
 
 Load the service:
+
 ```bash
 mkdir -p ~/researchPaperAgent/logs
 launchctl load ~/Library/LaunchAgents/com.researchpaper.backend.plist
@@ -209,6 +214,7 @@ nano ~/.cloudflared/config.yml
 ```
 
 Add to `config.yml`:
+
 ```yaml
 tunnel: <YOUR_TUNNEL_ID>
 credentials-file: /Users/youruser/.cloudflared/<TUNNEL_ID>.json
@@ -220,11 +226,13 @@ ingress:
 ```
 
 Route DNS:
+
 ```bash
 cloudflared tunnel route dns researchpaper-api api.yourdomain.com
 ```
 
 Run the tunnel:
+
 ```bash
 # Test first
 cloudflared tunnel run researchpaper-api
@@ -277,13 +285,15 @@ echo "VITE_API_BASE_URL=https://api.yourdomain.com" > frontend/.env.production
 Modify `frontend/src/services/api.ts` to use environment variables:
 
 Change line 17 from:
+
 ```typescript
-const API_BASE = '/api';
+const API_BASE = "/api";
 ```
 
 To:
+
 ```typescript
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 ```
 
 ### Step 3.3: Update Vite Config for Production
@@ -348,6 +358,7 @@ CORS_ORIGINS=http://localhost:3000,http://localhost:5173,https://your-app.vercel
 ```
 
 Restart the backend:
+
 ```bash
 launchctl stop com.researchpaper.backend
 launchctl start com.researchpaper.backend

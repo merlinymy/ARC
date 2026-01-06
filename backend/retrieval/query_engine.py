@@ -341,15 +341,74 @@ In this section, clearly indicate that this information comes from your general 
 This separation helps users distinguish between information from their specific papers vs. general knowledge."""
 
 # Web search system prompt - used for the separate web search call
-WEB_SEARCH_SYSTEM_PROMPT = """You are a helpful research assistant. Search the web for publicly available information related to the user's question. Focus on:
-- Recent publications and news
-- Educational resources
-- General background information
+WEB_SEARCH_SYSTEM_PROMPT = """You are a helpful research assistant. Search the web for publicly available information related to the user's question. Focus on recent publications, news, educational resources, and general background information.
 
-Provide factual information with source URLs. This is for educational and research purposes."""
+Provide factual information with source URLs. This is for educational and research purposes.
+
+You may use markdown formatting (headers, bold, lists) to organize your response clearly."""
 
 # Legacy alias for backward compatibility
 SYSTEM_PROMPTS = SYSTEM_PROMPTS_CONCISE
+
+
+def get_effective_prompt(
+    query_type: QueryType,
+    response_mode: str,
+    custom_prompts: Optional[Dict[str, Any]] = None
+) -> str:
+    """Get the effective system prompt, preferring custom over default.
+
+    Args:
+        query_type: The type of query
+        response_mode: 'concise' or 'detailed'
+        custom_prompts: Optional dict of custom prompts from user preferences
+
+    Returns:
+        The effective system prompt to use
+    """
+    # Get default prompt
+    if response_mode == "detailed":
+        default = SYSTEM_PROMPTS_DETAILED.get(query_type, SYSTEM_PROMPTS_DETAILED[QueryType.FACTUAL])
+    else:
+        default = SYSTEM_PROMPTS_CONCISE.get(query_type, SYSTEM_PROMPTS_CONCISE[QueryType.FACTUAL])
+
+    # Check for custom override
+    if custom_prompts and response_mode in custom_prompts:
+        mode_prompts = custom_prompts[response_mode]
+        if query_type.value in mode_prompts:
+            return mode_prompts[query_type.value]
+
+    return default
+
+
+def get_effective_addendum(
+    addendum_type: str,
+    custom_prompts: Optional[Dict[str, Any]] = None
+) -> str:
+    """Get the effective addendum prompt, preferring custom over default.
+
+    Args:
+        addendum_type: 'general_knowledge' or 'web_search'
+        custom_prompts: Optional dict of custom prompts from user preferences
+
+    Returns:
+        The effective addendum to use
+    """
+    # Default addendums
+    defaults = {
+        "general_knowledge": GENERAL_KNOWLEDGE_ADDENDUM,
+        "web_search": WEB_SEARCH_SYSTEM_PROMPT,
+    }
+
+    default = defaults.get(addendum_type, "")
+
+    # Check for custom override
+    if custom_prompts and "addendums" in custom_prompts:
+        addendums = custom_prompts["addendums"]
+        if addendum_type in addendums:
+            return addendums[addendum_type]
+
+    return default
 
 
 class QueryEngine:
@@ -456,6 +515,7 @@ class QueryEngine:
         response_mode: str = "detailed",
         enable_general_knowledge: bool = True,
         enable_web_search: bool = False,
+        custom_prompts: Optional[Dict[str, Any]] = None,
     ) -> QueryResult:
         """Execute the full query pipeline.
 
@@ -468,6 +528,7 @@ class QueryEngine:
             progress_callback: Optional callback(step_name, step_data) for real-time progress
             query_type_override: Optional query type override (skips classification if provided)
             enable_hyde_override: Optional override for HyDE (None = use system default)
+            custom_prompts: Optional dict of custom system prompts from user preferences
             enable_expansion_override: Optional override for query expansion (None = use system default)
             enable_citation_check_override: Optional override for citation verification (None = use system default)
             response_mode: "concise" for brief answers, "detailed" for comprehensive responses
@@ -829,6 +890,7 @@ class QueryEngine:
             enable_web_search=enable_web_search,
             progress_emitter=emit if progress_callback else None,
             temperature=effective_temperature,
+            custom_prompts=custom_prompts,
         )
         timing_generation_ms = (time.perf_counter() - timing_generation_start) * 1000
         emit("generation", {"status": "complete"})
@@ -1081,6 +1143,7 @@ class QueryEngine:
         enable_web_search: bool = False,
         progress_emitter: Optional[callable] = None,
         temperature: float = 0.3,
+        custom_prompts: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Generate answer using Claude with query-type-specific prompt.
 
@@ -1097,6 +1160,7 @@ class QueryEngine:
             enable_web_search: Whether to allow Claude to search the web
             progress_emitter: Optional callback(step, data) for progress events
             temperature: LLM temperature for response generation (default 0.3)
+            custom_prompts: Optional dict of custom system prompts from user preferences
 
         Returns:
             Complete answer text
@@ -1115,27 +1179,28 @@ class QueryEngine:
         # Format sources
         sources_text = self._format_sources(sources) if sources else ""
 
-        # Get query-type-specific system prompt based on response mode
-        if response_mode == "detailed":
-            prompt_dict = SYSTEM_PROMPTS_DETAILED
-            max_tokens = 4096  # More tokens for detailed responses
-            logger.info(f"Using DETAILED prompts with max_tokens={max_tokens}")
-        else:
-            prompt_dict = SYSTEM_PROMPTS_CONCISE
-            max_tokens = 2048
-            logger.info(f"Using CONCISE prompts with max_tokens={max_tokens}")
+        # Get query-type-specific system prompt (using custom prompts if available)
+        system_prompt = get_effective_prompt(query_type, response_mode, custom_prompts)
+        is_custom = custom_prompts and response_mode in custom_prompts and query_type.value in custom_prompts.get(response_mode, {})
 
-        system_prompt = prompt_dict.get(query_type, prompt_dict[QueryType.FACTUAL])
+        # Set max tokens based on response mode
+        if response_mode == "detailed":
+            max_tokens = 4096  # More tokens for detailed responses
+            logger.info(f"Using DETAILED prompt (custom={is_custom}) with max_tokens={max_tokens}")
+        else:
+            max_tokens = 2048
+            logger.info(f"Using CONCISE prompt (custom={is_custom}) with max_tokens={max_tokens}")
 
         # Web search requires general knowledge to be enabled
         if enable_web_search and not enable_general_knowledge:
             logger.warning("Web search requires general knowledge - enabling general knowledge")
             enable_general_knowledge = True
 
-        # Add general knowledge addendum if enabled (but NOT web search - that's done separately)
+        # Add general knowledge addendum if enabled (using custom addendum if available)
         if enable_general_knowledge:
-            system_prompt += GENERAL_KNOWLEDGE_ADDENDUM
-            logger.info("Added GENERAL_KNOWLEDGE_ADDENDUM to system prompt")
+            general_knowledge_addendum = get_effective_addendum("general_knowledge", custom_prompts)
+            system_prompt += general_knowledge_addendum
+            logger.info("Added general knowledge addendum to system prompt")
 
         # Build messages array with conversation history
         messages = []
@@ -1194,7 +1259,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
                     def web_search_progress(msg):
                         if progress_emitter:
                             progress_emitter("web_search_progress", {"message": msg})
-                    web_search_response = self._perform_web_search(query, stream_callback, web_search_progress)
+                    web_search_response = self._perform_web_search(query, stream_callback, web_search_progress, custom_prompts)
                     if progress_emitter:
                         progress_emitter("web_search", {"status": "complete"})
                     if web_search_response:
@@ -1224,7 +1289,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
                 # STEP 2: If web search is enabled, do a separate web search call
                 if enable_web_search and enable_general_knowledge:
                     logger.info("Performing separate web search call (non-streaming)")
-                    web_search_response = self._perform_web_search(query, None)
+                    web_search_response = self._perform_web_search(query, None, None, custom_prompts)
                     if web_search_response:
                         rag_response += web_search_response
 
@@ -1243,6 +1308,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
         query: str,
         stream_callback: Optional[callable] = None,
         progress_callback: Optional[callable] = None,
+        custom_prompts: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Perform a separate web search to supplement the RAG answer.
 
@@ -1250,6 +1316,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
             query: The original user query
             stream_callback: Optional callback for streaming final answer
             progress_callback: Optional callback for progress updates (search status)
+            custom_prompts: Optional dict of custom system prompts from user preferences
 
         Returns:
             Web search results formatted as markdown, or empty string if no results
@@ -1274,13 +1341,16 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
             # Use a faster model for web search since it's supplementary
             logger.info(f"Starting web search for query: {search_query[:100]}...")
 
+            # Get web search system prompt (using custom if available)
+            web_search_prompt = get_effective_addendum("web_search", custom_prompts)
+
             # Try with sonnet first (faster and less likely to refuse)
             web_search_model = "claude-sonnet-4-20250514"
             response = self.anthropic.messages.create(
                 model=web_search_model,
                 max_tokens=1024,
                 temperature=0.5,  # Slightly higher temp for more natural responses
-                system=WEB_SEARCH_SYSTEM_PROMPT,
+                system=web_search_prompt,
                 messages=web_search_messages,
                 tools=tools,
             )
@@ -1359,7 +1429,8 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
 
             # Build final result with URL references
             if final_text_parts:
-                final_text = " ".join(final_text_parts)
+                # Join with double newlines to preserve markdown block structure (headers, paragraphs, lists)
+                final_text = "\n\n".join(final_text_parts)
 
                 # Add sources section if we have URLs
                 if collected_urls:

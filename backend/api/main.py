@@ -29,7 +29,8 @@ from dependencies import (
     get_paper_library_service,
 )
 from qdrant_client import QdrantClient
-from retrieval.query_engine import QueryEngine
+from retrieval.query_engine import QueryEngine, SYSTEM_PROMPTS_CONCISE, SYSTEM_PROMPTS_DETAILED, GENERAL_KNOWLEDGE_ADDENDUM, WEB_SEARCH_SYSTEM_PROMPT
+from retrieval.query_classifier import QueryType
 from retrieval.qdrant_store import QdrantStore
 from services.paper_library import PaperLibraryService
 from services.chat_service import ChatService
@@ -563,6 +564,16 @@ async def query_papers(
         # Log received query options
         logger.info(f"Query request received - top_k: {request.top_k}, temperature: {request.temperature}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
 
+        # Fetch user's custom prompts if authenticated
+        custom_prompts = None
+        if current_user:
+            result = await session.execute(
+                select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+            )
+            prefs = result.scalar_one_or_none()
+            if prefs and prefs.custom_system_prompts:
+                custom_prompts = prefs.custom_system_prompts
+
         # Use the full QueryEngine pipeline
         result = query_engine.query(
             request.question,
@@ -577,6 +588,7 @@ async def query_papers(
             response_mode=request.response_mode,
             enable_general_knowledge=request.enable_general_knowledge,
             enable_web_search=request.enable_web_search,
+            custom_prompts=custom_prompts,
         )
 
         # Convert sources to API response format
@@ -693,6 +705,16 @@ async def query_papers_stream(
     # Log received query options for streaming endpoint
     logger.info(f"Stream query request - top_k: {request.top_k}, temperature: {request.temperature}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
 
+    # Fetch user's custom prompts if authenticated (before generator to avoid async issues)
+    custom_prompts = None
+    if current_user:
+        prefs_result = await session.execute(
+            select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+        )
+        prefs = prefs_result.scalar_one_or_none()
+        if prefs and prefs.custom_system_prompts:
+            custom_prompts = prefs.custom_system_prompts
+
     async def event_generator():
         progress_events = []
         result_holder = [None]
@@ -721,6 +743,7 @@ async def query_papers_stream(
                     response_mode=request.response_mode,
                     enable_general_knowledge=request.enable_general_knowledge,
                     enable_web_search=request.enable_web_search,
+                    custom_prompts=custom_prompts,
                 )
                 result_holder[0] = result
             except Exception as e:
@@ -1864,6 +1887,177 @@ async def update_user_preferences(
         enable_general_knowledge=prefs.enable_general_knowledge,
         enable_web_search=prefs.enable_web_search,
     )
+
+
+# =============================================================================
+# System Prompts Endpoints
+# =============================================================================
+
+class SystemPromptsResponse(BaseModel):
+    """Response model for system prompts."""
+    defaults: dict  # All default prompts organized by mode
+    custom: Optional[dict] = None  # User's custom prompts (null if none)
+    query_types: List[str]  # Available query types
+
+
+class SystemPromptUpdateRequest(BaseModel):
+    """Request model for updating a single system prompt."""
+    mode: str = Field(..., description="'concise', 'detailed', or 'addendums'")
+    prompt_type: str = Field(..., description="Query type or addendum name")
+    content: str = Field(..., description="New prompt content")
+
+
+def get_default_prompts() -> dict:
+    """Get all default system prompts organized by mode."""
+    return {
+        "concise": {qt.value: SYSTEM_PROMPTS_CONCISE[qt] for qt in QueryType},
+        "detailed": {qt.value: SYSTEM_PROMPTS_DETAILED[qt] for qt in QueryType},
+        "addendums": {
+            "general_knowledge": GENERAL_KNOWLEDGE_ADDENDUM,
+            "web_search": WEB_SEARCH_SYSTEM_PROMPT,
+        }
+    }
+
+
+@app.get("/user/prompts", response_model=SystemPromptsResponse)
+async def get_system_prompts(
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Get all system prompts with user customizations."""
+    result = await session.execute(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    )
+    prefs = result.scalar_one_or_none()
+
+    defaults = get_default_prompts()
+    custom = prefs.custom_system_prompts if prefs else None
+    query_types = [qt.value for qt in QueryType]
+
+    return SystemPromptsResponse(
+        defaults=defaults,
+        custom=custom,
+        query_types=query_types,
+    )
+
+
+@app.put("/user/prompts", response_model=SystemPromptsResponse)
+async def update_system_prompt(
+    request: SystemPromptUpdateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Update a single system prompt."""
+    # Validate mode
+    if request.mode not in ["concise", "detailed", "addendums"]:
+        raise HTTPException(status_code=400, detail="Invalid mode. Must be 'concise', 'detailed', or 'addendums'")
+
+    # Validate prompt_type
+    valid_query_types = [qt.value for qt in QueryType]
+    valid_addendums = ["general_knowledge", "web_search"]
+
+    if request.mode in ["concise", "detailed"] and request.prompt_type not in valid_query_types:
+        raise HTTPException(status_code=400, detail=f"Invalid prompt_type. Must be one of: {valid_query_types}")
+    if request.mode == "addendums" and request.prompt_type not in valid_addendums:
+        raise HTTPException(status_code=400, detail=f"Invalid prompt_type for addendums. Must be one of: {valid_addendums}")
+
+    # Get or create preferences
+    result = await session.execute(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    )
+    prefs = result.scalar_one_or_none()
+
+    if not prefs:
+        prefs = UserPreferences(user_id=current_user.id)
+        session.add(prefs)
+
+    # Initialize custom_system_prompts if needed
+    if prefs.custom_system_prompts is None:
+        prefs.custom_system_prompts = {}
+
+    # Create a copy to modify (SQLAlchemy JSON mutation tracking)
+    custom_prompts = dict(prefs.custom_system_prompts)
+
+    # Ensure mode dict exists
+    if request.mode not in custom_prompts:
+        custom_prompts[request.mode] = {}
+
+    # Update the specific prompt
+    custom_prompts[request.mode][request.prompt_type] = request.content
+
+    # Assign back to trigger SQLAlchemy change detection
+    prefs.custom_system_prompts = custom_prompts
+
+    await session.commit()
+    await session.refresh(prefs)
+
+    logger.info(f"Updated {request.mode}/{request.prompt_type} prompt for user {current_user.username}")
+
+    return SystemPromptsResponse(
+        defaults=get_default_prompts(),
+        custom=prefs.custom_system_prompts,
+        query_types=[qt.value for qt in QueryType],
+    )
+
+
+@app.delete("/user/prompts/{mode}/{prompt_type}")
+async def reset_single_prompt(
+    mode: str,
+    prompt_type: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Reset a single prompt to default."""
+    # Validate mode
+    if mode not in ["concise", "detailed", "addendums"]:
+        raise HTTPException(status_code=400, detail="Invalid mode")
+
+    result = await session.execute(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    )
+    prefs = result.scalar_one_or_none()
+
+    if not prefs or not prefs.custom_system_prompts:
+        return {"message": "No custom prompts to reset"}
+
+    # Create a copy to modify
+    custom_prompts = dict(prefs.custom_system_prompts)
+
+    # Remove the specific prompt if it exists
+    if mode in custom_prompts and prompt_type in custom_prompts[mode]:
+        del custom_prompts[mode][prompt_type]
+        # Clean up empty mode dict
+        if not custom_prompts[mode]:
+            del custom_prompts[mode]
+
+    # Set to None if no custom prompts remain
+    prefs.custom_system_prompts = custom_prompts if custom_prompts else None
+
+    await session.commit()
+
+    logger.info(f"Reset {mode}/{prompt_type} prompt to default for user {current_user.username}")
+
+    return {"message": f"Reset {mode}/{prompt_type} to default"}
+
+
+@app.delete("/user/prompts")
+async def reset_all_prompts(
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Reset all prompts to defaults."""
+    result = await session.execute(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    )
+    prefs = result.scalar_one_or_none()
+
+    if prefs:
+        prefs.custom_system_prompts = None
+        await session.commit()
+
+    logger.info(f"Reset all prompts to defaults for user {current_user.username}")
+
+    return {"message": "All prompts reset to defaults"}
 
 
 # =============================================================================

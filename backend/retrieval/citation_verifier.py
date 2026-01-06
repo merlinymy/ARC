@@ -275,6 +275,51 @@ Format: VERDICT | CONFIDENCE | EXPLANATION'''
             warnings=warnings,
         )
 
+    def verify_single_citation(
+        self,
+        claim: str,
+        source_id: int,
+        sources: List[Dict],
+    ) -> Optional[CitationCheck]:
+        """Verify a single citation claim against sources.
+
+        Args:
+            claim: The claim text (sentence without citation markers)
+            source_id: The 1-indexed source ID being cited
+            sources: List of source documents
+
+        Returns:
+            CitationCheck result or None if source doesn't exist
+        """
+        source_idx = source_id - 1
+
+        if source_idx < 0 or source_idx >= len(sources):
+            logger.warning(f"Citation [Source {source_id}] references non-existent source")
+            return None
+
+        source = sources[source_idx]
+        source_text = source.get('text', '')
+        source_title = source.get('title', f'Source {source_id}')
+
+        if self.use_llm:
+            is_valid, confidence, explanation = self.verify_citation_llm(
+                claim, source_text, source_title
+            )
+        else:
+            is_valid, confidence, explanation = self.verify_citation_basic(
+                claim, source_text
+            )
+
+        return CitationCheck(
+            citation_id=source_id,
+            claim=claim,
+            source_text=source_text[:200] + "...",
+            source_title=source_title,
+            is_valid=is_valid,
+            confidence=confidence,
+            explanation=explanation,
+        )
+
     def add_confidence_note(
         self,
         answer: str,
@@ -302,3 +347,112 @@ Format: VERDICT | CONFIDENCE | EXPLANATION'''
             return answer + note
 
         return answer
+
+
+class StreamingCitationVerifier:
+    """Verify citations in real-time as text streams in.
+
+    This class buffers streamed text and verifies citations as soon as
+    complete sentences containing citations are detected.
+    """
+
+    def __init__(
+        self,
+        verifier: CitationVerifier,
+        sources: List[Dict],
+        on_citation_verified: callable,
+    ):
+        """Initialize streaming verifier.
+
+        Args:
+            verifier: CitationVerifier instance
+            sources: List of source documents for verification
+            on_citation_verified: Callback(CitationCheck) called when a citation is verified
+        """
+        self.verifier = verifier
+        self.sources = sources
+        self.on_citation_verified = on_citation_verified
+        self.buffer = ""
+        self.verified_claims: set = set()  # Track which claims we've already verified
+
+    def process_chunk(self, chunk: str) -> None:
+        """Process a new chunk of streamed text.
+
+        Buffers text and verifies citations when complete sentences are detected.
+
+        Args:
+            chunk: New text chunk from the stream
+        """
+        self.buffer += chunk
+
+        # Look for complete sentences (ending with . ! or ?)
+        # We need to be careful not to split on abbreviations like "Fig." or "et al."
+        sentence_pattern = re.compile(r'([^.!?]*(?:[.!?](?:\s|$)))')
+
+        matches = sentence_pattern.findall(self.buffer)
+
+        if not matches:
+            return
+
+        # Process complete sentences (all but the last which might be incomplete)
+        for sentence in matches[:-1]:
+            self._verify_sentence(sentence.strip())
+
+        # If the buffer ends with a sentence terminator, process the last match too
+        if self.buffer.rstrip().endswith(('.', '!', '?')):
+            self._verify_sentence(matches[-1].strip())
+            self.buffer = ""
+        else:
+            # Keep incomplete sentence in buffer
+            self.buffer = matches[-1] if matches else self.buffer
+
+    def _verify_sentence(self, sentence: str) -> None:
+        """Verify all citations in a sentence.
+
+        Args:
+            sentence: Complete sentence to check for citations
+        """
+        if not sentence:
+            return
+
+        # Find citations in this sentence
+        matches = CitationVerifier.CITATION_PATTERN.findall(sentence)
+
+        if not matches:
+            return
+
+        # Extract the claim (sentence without citation markers)
+        claim = CitationVerifier.CITATION_PATTERN.sub('', sentence).strip()
+
+        if not claim:
+            return
+
+        # Create a unique key for this claim to avoid duplicate verification
+        claim_key = claim.lower()
+        if claim_key in self.verified_claims:
+            return
+
+        self.verified_claims.add(claim_key)
+
+        # Verify each cited source
+        for match in matches:
+            source_ids = [int(s.strip()) for s in match.split(',')]
+
+            for source_id in source_ids:
+                check = self.verifier.verify_single_citation(
+                    claim=claim,
+                    source_id=source_id,
+                    sources=self.sources,
+                )
+
+                if check and self.on_citation_verified:
+                    self.on_citation_verified(check)
+
+    def flush(self) -> None:
+        """Process any remaining text in the buffer.
+
+        Call this when streaming is complete to verify any remaining citations.
+        """
+        if self.buffer.strip():
+            self._verify_sentence(self.buffer.strip())
+            self.buffer = ""

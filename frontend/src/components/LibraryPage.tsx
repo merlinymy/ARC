@@ -22,6 +22,11 @@ export function LibraryPage() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [selectedPaperIds, setSelectedPaperIds] = useState<Set<string>>(new Set());
 
+  // Search pagination state
+  const [totalSearchResults, setTotalSearchResults] = useState(0);
+  const [hasMoreSearchResults, setHasMoreSearchResults] = useState(false);
+  const [isLoadingMoreSearchResults, setIsLoadingMoreSearchResults] = useState(false);
+
   // Sentinel ref for infinite scroll
   const sentinelRef = useRef<HTMLDivElement>(null);
 
@@ -76,6 +81,8 @@ export function LibraryPage() {
   const performSemanticSearch = useCallback(async (query: string) => {
     if (!query.trim()) {
       setSemanticResults([]);
+      setTotalSearchResults(0);
+      setHasMoreSearchResults(false);
       return;
     }
 
@@ -83,15 +90,35 @@ export function LibraryPage() {
     setSearchError(null);
 
     try {
-      const response = await searchPapers(query, 20);
+      const response = await searchPapers(query, 25, 0);
       setSemanticResults(response.results);
+      setTotalSearchResults(response.total);
+      setHasMoreSearchResults(response.hasMore);
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : 'Search failed');
       setSemanticResults([]);
+      setTotalSearchResults(0);
+      setHasMoreSearchResults(false);
     } finally {
       setIsSearching(false);
     }
   }, []);
+
+  // Load more search results
+  const loadMoreSearchResults = useCallback(async () => {
+    if (!searchQuery.trim() || isLoadingMoreSearchResults || !hasMoreSearchResults) return;
+
+    setIsLoadingMoreSearchResults(true);
+    try {
+      const response = await searchPapers(searchQuery, 25, semanticResults.length);
+      setSemanticResults(prev => [...prev, ...response.results]);
+      setHasMoreSearchResults(response.hasMore);
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : 'Failed to load more results');
+    } finally {
+      setIsLoadingMoreSearchResults(false);
+    }
+  }, [searchQuery, semanticResults.length, isLoadingMoreSearchResults, hasMoreSearchResults]);
 
   // Debounce semantic search
   useEffect(() => {
@@ -173,7 +200,7 @@ export function LibraryPage() {
   };
 
   // Display count: show total when browsing, search results when searching
-  const displayCount = searchQuery.trim() ? semanticResults.length : totalPapers;
+  const displayCount = searchQuery.trim() ? totalSearchResults : totalPapers;
   const loadedCount = searchQuery.trim() ? semanticResults.length : papers.length;
 
   return (
@@ -189,7 +216,7 @@ export function LibraryPage() {
               </h1>
               <p className="text-sm text-gray-500 dark:text-gray-400">
                 {searchQuery.trim()
-                  ? `${displayCount} papers found`
+                  ? `${loadedCount} of ${displayCount} papers found`
                   : `${loadedCount} of ${displayCount} papers loaded`
                 }
               </p>
@@ -285,7 +312,7 @@ export function LibraryPage() {
               </div>
             ) : semanticResults.length > 0 ? (
               <div className="text-sm text-purple-600 dark:text-purple-400">
-                Found {semanticResults.length} papers matching "{searchQuery}"
+                Showing {semanticResults.length} of {totalSearchResults} papers matching "{searchQuery}"
               </div>
             ) : !isSearching ? (
               <div className="text-sm text-gray-500 dark:text-gray-400">
@@ -352,7 +379,30 @@ export function LibraryPage() {
               ))}
             </div>
 
-            {/* Infinite scroll sentinel */}
+            {/* Load more for search results */}
+            {searchQuery.trim() && (
+              <div className="h-20 flex items-center justify-center mt-4">
+                {isLoadingMoreSearchResults ? (
+                  <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400">
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span className="text-sm">Loading more results...</span>
+                  </div>
+                ) : hasMoreSearchResults ? (
+                  <button
+                    onClick={loadMoreSearchResults}
+                    className="px-4 py-2 text-sm text-purple-600 dark:text-purple-400 hover:underline"
+                  >
+                    Load more results ({totalSearchResults - semanticResults.length} remaining)
+                  </button>
+                ) : semanticResults.length > 0 ? (
+                  <span className="text-sm text-gray-400 dark:text-gray-500">
+                    All {totalSearchResults} matching papers shown
+                  </span>
+                ) : null}
+              </div>
+            )}
+
+            {/* Infinite scroll sentinel for browsing */}
             {!searchQuery.trim() && (
               <div
                 ref={sentinelRef}

@@ -14,7 +14,7 @@ import type {
 } from '../types';
 import { getAuthToken } from '../context/AuthContext';
 
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
 // Helper to get auth headers
 function getAuthHeaders(): HeadersInit {
@@ -35,12 +35,44 @@ export type PipelineStep =
   | 'retrieval'
   | 'reranking'
   | 'generation'
+  | 'answer_chunk'
+  | 'answer_complete'
+  | 'citation_verified'
   | 'verification';
 
 export interface ProgressEvent {
   type: 'progress';
   step: PipelineStep;
   data: Record<string, unknown>;
+}
+
+// New event types for streaming LLM response
+export interface AnswerChunkEvent {
+  type: 'progress';
+  step: 'answer_chunk';
+  data: {
+    chunk: string;
+  };
+}
+
+export interface AnswerCompleteEvent {
+  type: 'progress';
+  step: 'answer_complete';
+  data: {
+    answer: string;
+  };
+}
+
+export interface CitationVerifiedEvent {
+  type: 'progress';
+  step: 'citation_verified';
+  data: {
+    citation_id: number;
+    claim: string;
+    confidence: number;
+    is_valid: boolean;
+    explanation: string;
+  };
 }
 
 export interface CompleteEvent {
@@ -53,6 +85,7 @@ export interface CompleteEvent {
   retrieval_count: number;
   reranked_count: number;
   warnings: string[];
+  citation_checks: QueryResponse['citation_checks'];
 }
 
 export interface ErrorEvent {
@@ -60,7 +93,7 @@ export interface ErrorEvent {
   message: string;
 }
 
-export type StreamEvent = ProgressEvent | CompleteEvent | ErrorEvent;
+export type StreamEvent = ProgressEvent | AnswerChunkEvent | AnswerCompleteEvent | CitationVerifiedEvent | CompleteEvent | ErrorEvent;
 
 class ApiError extends Error {
   status: number;
@@ -379,9 +412,14 @@ export interface PaperSearchResult {
 // Semantic search for papers
 export async function searchPapers(
   query: string,
-  limit: number = 20
-): Promise<{ results: PaperSearchResult[]; query: string; total: number }> {
-  const params = new URLSearchParams({ q: query, limit: limit.toString() });
+  limit: number = 25,
+  offset: number = 0
+): Promise<{ results: PaperSearchResult[]; query: string; total: number; hasMore: boolean }> {
+  const params = new URLSearchParams({
+    q: query,
+    limit: limit.toString(),
+    offset: offset.toString(),
+  });
   const response = await fetch(`${API_BASE}/papers/search?${params}`);
   const data = await handleResponse<{
     results: Array<{
@@ -401,6 +439,7 @@ export async function searchPapers(
     }>;
     query: string;
     total: number;
+    has_more: boolean;
   }>(response);
 
   return {
@@ -421,6 +460,7 @@ export async function searchPapers(
     })),
     query: data.query,
     total: data.total,
+    hasMore: data.has_more,
   };
 }
 

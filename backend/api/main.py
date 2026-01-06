@@ -312,6 +312,15 @@ class Source(BaseModel):
     relevance_score: float
 
 
+class CitationCheck(BaseModel):
+    """Citation verification result."""
+    citation_id: int
+    claim: str
+    confidence: float
+    is_valid: bool
+    explanation: str
+
+
 class QueryResponse(BaseModel):
     """Response model for chat queries."""
     answer: str
@@ -322,6 +331,7 @@ class QueryResponse(BaseModel):
     retrieval_count: int
     reranked_count: int
     warnings: List[str] = []
+    citation_checks: List[CitationCheck] = []
 
 
 @app.get("/")
@@ -335,15 +345,15 @@ async def root():
 
 
 async def check_voyage_health() -> dict:
-    """Check Voyage AI connectivity."""
-    try:
-        import voyageai
-        client = voyageai.Client(api_key=settings.voyage_api_key)
-        # Minimal embedding call to verify connectivity
-        client.embed(["health check"], model=settings.embedding_model, truncation=True)
-        return {"status": "healthy", "error": None}
-    except Exception as e:
-        return {"status": "unhealthy", "error": str(e)}
+    """Check Voyage AI connectivity.
+
+    Note: We don't make actual API calls here to avoid slow page loads.
+    Real embedding calls take 1-3 seconds which blocks the health check.
+    Instead, we just verify the API key is configured.
+    """
+    if not settings.voyage_api_key:
+        return {"status": "unhealthy", "error": "VOYAGE_API_KEY not configured"}
+    return {"status": "healthy", "error": None}
 
 
 async def check_cohere_health() -> dict:
@@ -359,18 +369,15 @@ async def check_cohere_health() -> dict:
 
 
 async def check_anthropic_health() -> dict:
-    """Check Anthropic connectivity."""
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        # Use a minimal API call - count tokens is lightweight
-        client.messages.count_tokens(
-            model=settings.claude_model,
-            messages=[{"role": "user", "content": "test"}]
-        )
-        return {"status": "healthy", "error": None}
-    except Exception as e:
-        return {"status": "unhealthy", "error": str(e)}
+    """Check Anthropic connectivity.
+
+    Note: We don't make actual API calls here to avoid slow page loads.
+    Token counting calls take 0.5-2 seconds which blocks the health check.
+    Instead, we just verify the API key is configured.
+    """
+    if not settings.anthropic_api_key:
+        return {"status": "unhealthy", "error": "ANTHROPIC_API_KEY not configured"}
+    return {"status": "healthy", "error": None}
 
 
 @app.get("/health")
@@ -538,6 +545,18 @@ async def query_papers(
                 # Log but don't fail the request if message persistence fails
                 logger.warning(f"Failed to persist chat messages: {e}")
 
+        # Convert citation checks to API format
+        citation_checks = [
+            CitationCheck(
+                citation_id=c.citation_id,
+                claim=c.claim,
+                confidence=c.confidence,
+                is_valid=c.is_valid,
+                explanation=c.explanation,
+            )
+            for c in result.citation_checks
+        ]
+
         return QueryResponse(
             answer=result.answer,
             sources=sources,
@@ -547,6 +566,7 @@ async def query_papers(
             retrieval_count=result.retrieval_count,
             reranked_count=result.reranked_count,
             warnings=result.warnings,
+            citation_checks=citation_checks,
         )
 
     except Exception as e:
@@ -643,6 +663,18 @@ async def query_papers_stream(
                     "relevance_score": source.get('score', 0.0),
                 })
 
+            # Convert citation checks to dict format for JSON
+            citation_checks = [
+                {
+                    "citation_id": c.citation_id,
+                    "claim": c.claim,
+                    "confidence": c.confidence,
+                    "is_valid": c.is_valid,
+                    "explanation": c.explanation,
+                }
+                for c in result.citation_checks
+            ]
+
             final_data = {
                 "type": "complete",
                 "answer": result.answer,
@@ -653,6 +685,7 @@ async def query_papers_stream(
                 "retrieval_count": result.retrieval_count,
                 "reranked_count": result.reranked_count,
                 "warnings": result.warnings,
+                "citation_checks": citation_checks,
             }
             yield f"data: {json.dumps(final_data)}\n\n"
 
@@ -716,8 +749,14 @@ async def get_stats(
     query_engine: QueryEngine = Depends(get_query_engine),
 ):
     """Get statistics about the database and pipeline."""
+    from retrieval.analytics import get_analytics_tracker
+
     try:
         collection_info = qdrant.get_collection(settings.qdrant_collection_name)
+
+        # Get analytics data
+        analytics_tracker = get_analytics_tracker()
+        analytics_data = analytics_tracker.get_stats()
 
         return {
             "collection_name": settings.qdrant_collection_name,
@@ -727,6 +766,7 @@ async def get_stats(
             "llm_model": settings.claude_model,
             "cache_stats": query_engine.get_cache_stats(),
             "conversation_stats": query_engine.get_conversation_stats(),
+            "analytics": analytics_data,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting stats: {str(e)}")
@@ -818,6 +858,7 @@ class PaperSearchResponse(BaseModel):
     results: List[PaperSearchResult]
     query: str
     total: int
+    has_more: bool = False
 
 
 class CheckDuplicatesRequest(BaseModel):
@@ -898,15 +939,17 @@ async def backfill_paper_hashes(
 @app.get("/papers/search", response_model=PaperSearchResponse)
 async def search_papers(
     q: str = Query(..., min_length=1, description="Search query"),
-    limit: int = Query(20, ge=1, le=100, description="Maximum results"),
+    limit: int = Query(25, ge=1, le=100, description="Maximum results per page"),
+    offset: int = Query(0, ge=0, description="Number of results to skip"),
     library: PaperLibraryService = Depends(get_paper_library_service),
 ):
     """Semantic search for papers using natural language queries.
 
     Searches paper-level embeddings to find the most relevant papers.
+    Supports pagination with offset and limit.
     """
     try:
-        results = library.search_papers(query=q, limit=limit)
+        results, total_count = library.search_papers(query=q, limit=limit, offset=offset)
         search_results = [
             PaperSearchResult(
                 paper_id=r['paper_id'],
@@ -925,10 +968,12 @@ async def search_papers(
             )
             for r in results
         ]
+        has_more = (offset + len(search_results)) < total_count
         return PaperSearchResponse(
             results=search_results,
             query=q,
-            total=len(search_results),
+            total=total_count,
+            has_more=has_more,
         )
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e))

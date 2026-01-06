@@ -1,13 +1,13 @@
 // Query Types matching backend classification
 export type QueryType =
   | 'factual'
+  | 'framing'
   | 'methods'
   | 'summary'
   | 'comparative'
   | 'novelty'
   | 'limitations'
-  | 'general'
-  | 'clarification';
+  | 'general';
 
 // Chunk types from the document
 export type ChunkType = 'abstract' | 'section' | 'fine' | 'table' | 'caption' | 'full';
@@ -29,6 +29,15 @@ export interface Source {
   relevance_score: number;
 }
 
+// Citation verification check result
+export interface CitationCheck {
+  citation_id: number;
+  claim: string;
+  confidence: number;
+  is_valid: boolean;
+  explanation: string;
+}
+
 // Query response from backend
 export interface QueryResponse {
   answer: string;
@@ -39,6 +48,7 @@ export interface QueryResponse {
   retrieval_count: number;
   reranked_count: number;
   warnings: string[];
+  citation_checks: CitationCheck[];
 }
 
 // Message in a conversation
@@ -57,6 +67,7 @@ export interface Message {
     rerankedCount?: number;
     latency?: number;
     warnings?: string[];
+    citationChecks?: CitationCheck[];
   };
 }
 
@@ -248,6 +259,39 @@ export interface CacheStats {
   };
 }
 
+// Analytics statistics for dashboard
+export interface EntityStat {
+  name: string;
+  count: number;
+}
+
+export interface AnalyticsStats {
+  query_type_distribution: Record<string, number>;
+  citation_stats: {
+    avg_score: number;
+    verified_rate: number;
+    partial_rate: number;
+    failed_rate: number;
+    total_checked: number;
+  };
+  latency_stats: {
+    query_processing_ms: number;
+    embedding_ms: number;
+    retrieval_ms: number;
+    reranking_ms: number;
+    generation_ms: number;
+    total_avg_ms: number;
+  };
+  entity_stats: {
+    chemicals: EntityStat[];
+    proteins: EntityStat[];
+    methods: EntityStat[];
+    organisms: EntityStat[];
+    metrics: EntityStat[];
+  };
+  total_queries: number;
+}
+
 // Statistics response
 export interface StatsResponse {
   collection_name: string;
@@ -260,6 +304,7 @@ export interface StatsResponse {
     turns: number;
     papers_discussed: string[];
   };
+  analytics?: AnalyticsStats;
 }
 
 // Pipeline step for visualization
@@ -283,7 +328,19 @@ export type PipelineStepName =
   | 'retrieval'
   | 'reranking'
   | 'generation'
+  | 'answer_chunk'
+  | 'answer_complete'
+  | 'citation_verified'
   | 'verification';
+
+// Streaming citation verification result
+export interface StreamingCitationCheck {
+  citation_id: number;
+  claim: string;
+  confidence: number;
+  is_valid: boolean;
+  explanation: string;
+}
 
 // Step info for display
 export interface PipelineStepInfo {
@@ -307,6 +364,15 @@ export const PIPELINE_STEPS: Array<{ name: PipelineStepName; label: string; desc
   { name: 'generation', label: 'Generation', description: 'Creating answer' },
   { name: 'verification', label: 'Verification', description: 'Checking citations' },
 ];
+
+// Streaming state for progressive response building
+export interface StreamingState {
+  messageId: string;
+  conversationId: string;
+  content: string;
+  citationChecks: CitationCheck[];
+  isStreaming: boolean;
+}
 
 // App state
 export interface AppState {
@@ -345,6 +411,9 @@ export interface AppState {
   activeBatchUpload: BatchUpload | null;
   isUploadPanelOpen: boolean;
   isUploadPanelMinimized: boolean;
+
+  // Streaming state for LLM response
+  streamingState: StreamingState | null;
 }
 
 // Default query options

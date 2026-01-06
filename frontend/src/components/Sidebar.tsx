@@ -46,7 +46,7 @@ function groupConversationsByDate(conversations: Conversation[]): Record<string,
 
 export function Sidebar() {
   const { state, dispatch, createNewConversation, setActivePage, toggleSidebar, selectConversation } = useApp();
-  const { conversations, activeConversationId, stats } = state;
+  const { conversations, activeConversationId, activePage, stats } = state;
 
   const groupedConversations = groupConversationsByDate(conversations);
 
@@ -119,7 +119,7 @@ export function Sidebar() {
                     }
                   }}
                   className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-left group cursor-pointer ${
-                    activeConversationId === conv.id
+                    activeConversationId === conv.id && activePage === 'chat'
                       ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
                       : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300'
                   }`}
@@ -159,11 +159,23 @@ export function Sidebar() {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-400 dark:text-gray-500">
-              {state.papers?.length || 0} papers
+              {state.totalPapers || state.papers?.length || 0} papers
             </span>
             <ChevronRight className="w-4 h-4 text-gray-400" />
           </div>
         </button>
+        {/* Currently viewing paper */}
+        {state.viewingPdfId && (() => {
+          const viewingPaper = state.papers.find(p => p.id === state.viewingPdfId);
+          return viewingPaper ? (
+            <div className="px-4 py-2 bg-blue-50 dark:bg-blue-900/20 border-t border-gray-200 dark:border-gray-700">
+              <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">Currently viewing:</div>
+              <div className="text-sm text-blue-700 dark:text-blue-300 truncate font-medium">
+                {viewingPaper.title}
+              </div>
+            </div>
+          ) : null;
+        })()}
       </div>
 
       {/* Quick Stats */}

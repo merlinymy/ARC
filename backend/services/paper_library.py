@@ -168,6 +168,54 @@ class PaperLibraryService:
 
         return result
 
+    def backfill_paper_metadata(self, force: bool = False) -> Dict[str, Any]:
+        """One-time backfill of paper metadata cache from Qdrant.
+
+        This scans Qdrant once to build a cache of paper metadata.
+        After this runs, list_papers() becomes instant.
+
+        Args:
+            force: If True, rebuild cache even if it exists
+
+        Returns:
+            Dict with status and count of papers backfilled
+        """
+        checkpoint = self._load_checkpoint()
+        existing_metadata = checkpoint.get("paper_metadata", {})
+
+        # Skip if already populated (unless forced)
+        if existing_metadata and not force:
+            return {"status": "skipped", "count": len(existing_metadata), "message": "Cache already exists"}
+
+        logger.info("Backfilling paper metadata cache from Qdrant...")
+
+        # Scan Qdrant once to get all papers (this is slow but only runs once)
+        papers_data, total_count = self.store.get_papers_paginated(offset=0, limit=None)
+
+        paper_metadata = {}
+        for paper_data in papers_data:
+            paper_id = paper_data['paper_id']
+
+            # Get chunk stats (still slow, but only during backfill)
+            chunk_stats = self.store.get_paper_chunk_stats(paper_id)
+
+            paper_metadata[paper_id] = {
+                "title": paper_data.get('title', 'Unknown'),
+                "authors": paper_data.get('authors', []),
+                "year": paper_data.get('year'),
+                "filename": paper_data.get('file_name', ''),
+                "chunk_count": sum(chunk_stats.values()),
+                "chunk_stats": chunk_stats,
+                "page_count": 0,  # Skip expensive page count query
+                "indexed_at": datetime.now().isoformat(),
+            }
+
+        checkpoint["paper_metadata"] = paper_metadata
+        self._save_checkpoint(checkpoint)
+
+        logger.info(f"Backfilled metadata for {len(paper_metadata)} papers")
+        return {"status": "success", "count": len(paper_metadata)}
+
     def _load_checkpoint(self) -> Dict[str, Any]:
         """Load the indexing checkpoint file."""
         if CHECKPOINT_FILE.exists():
@@ -208,6 +256,9 @@ class PaperLibraryService:
     ) -> PaginatedPapers:
         """List papers in the library with pagination.
 
+        Uses cached metadata from checkpoint file for fast retrieval.
+        Automatically backfills cache from Qdrant if empty.
+
         Args:
             offset: Number of papers to skip
             limit: Maximum papers to return (None for all - backwards compatible)
@@ -215,64 +266,65 @@ class PaperLibraryService:
         Returns:
             PaginatedPapers with papers list and pagination metadata
         """
-        # Get paginated papers from Qdrant
-        papers_data, total_count = self.store.get_papers_paginated(
-            offset=offset, limit=limit
-        )
         checkpoint = self._load_checkpoint()
+        paper_metadata = checkpoint.get("paper_metadata", {})
+
+        # Backfill cache if empty (one-time slow operation)
+        if not paper_metadata:
+            self.backfill_paper_metadata()
+            checkpoint = self._load_checkpoint()
+            paper_metadata = checkpoint.get("paper_metadata", {})
+
         indexed_set = set(checkpoint.get("indexed_papers", []))
         failed_papers = checkpoint.get("failed_papers", {})
 
-        papers = []
-        for paper_data in papers_data:
-            paper_id = paper_data['paper_id']
+        # Get all paper IDs sorted by indexed_at (newest first)
+        all_paper_ids = sorted(
+            paper_metadata.keys(),
+            key=lambda pid: paper_metadata[pid].get("indexed_at", ""),
+            reverse=True
+        )
+        total_count = len(all_paper_ids)
 
-            # Get chunk statistics
-            chunk_stats = self.store.get_paper_chunk_stats(paper_id)
-            chunk_count = sum(chunk_stats.values())
+        # Apply pagination
+        actual_limit = limit if limit is not None else total_count
+        paginated_ids = all_paper_ids[offset:offset + actual_limit] if limit else all_paper_ids[offset:]
+
+        papers = []
+        for paper_id in paginated_ids:
+            meta = paper_metadata[paper_id]
+            chunk_stats = meta.get("chunk_stats", {})
+            chunk_count = meta.get("chunk_count", sum(chunk_stats.values()))
 
             # Determine status
-            # If we have chunks in Qdrant, the paper is indexed (regardless of checkpoint)
             if paper_id in failed_papers:
                 status = "error"
                 error_msg = failed_papers[paper_id]
-            elif chunk_count > 0:
-                # Chunks exist in Qdrant = successfully indexed
-                status = "indexed"
-                error_msg = None
-            elif paper_id in indexed_set:
+            elif chunk_count > 0 or paper_id in indexed_set:
                 status = "indexed"
                 error_msg = None
             else:
                 status = "pending"
                 error_msg = None
 
-            # Get page count from chunks if available
-            page_count = 0
-            chunks = self.store.get_chunks_by_paper(paper_id, chunk_types=["abstract"])
-            if chunks:
-                page_numbers = chunks[0].get('page_numbers', [])
-                if page_numbers:
-                    page_count = max(page_numbers)
+            indexed_at_str = meta.get("indexed_at")
+            indexed_at = datetime.fromisoformat(indexed_at_str) if indexed_at_str else None
 
             papers.append(PaperInfo(
                 paper_id=paper_id,
-                title=paper_data.get('title', 'Unknown'),
-                authors=paper_data.get('authors', []),
-                year=paper_data.get('year'),
-                filename=paper_data.get('file_name', ''),
-                page_count=page_count,
+                title=meta.get("title", "Unknown"),
+                authors=meta.get("authors", []),
+                year=meta.get("year"),
+                filename=meta.get("filename", ""),
+                page_count=meta.get("page_count", 0),
                 chunk_count=chunk_count,
                 chunk_stats=chunk_stats,
-                indexed_at=None,  # Could be extracted from checkpoint if stored
+                indexed_at=indexed_at,
                 status=status,
                 error_message=error_msg,
             ))
 
-        # Calculate pagination metadata
-        actual_limit = limit if limit is not None else total_count
         has_more = (offset + len(papers)) < total_count
-
         return PaginatedPapers(
             papers=papers,
             total=total_count,
@@ -281,7 +333,9 @@ class PaperLibraryService:
             has_more=has_more,
         )
 
-    def search_papers(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+    def search_papers(
+        self, query: str, limit: int = 25, offset: int = 0
+    ) -> tuple[List[Dict[str, Any]], int]:
         """Semantic search for papers using the query.
 
         Searches using FULL chunk embeddings (paper-level) for best results,
@@ -289,10 +343,11 @@ class PaperLibraryService:
 
         Args:
             query: Natural language search query
-            limit: Maximum number of results to return
+            limit: Maximum number of results to return per page
+            offset: Number of results to skip (for pagination)
 
         Returns:
-            List of papers with relevance scores and preview, sorted by score descending
+            Tuple of (paginated results list, total count of all matching papers)
         """
         if not self.embedder:
             raise ValueError("Embedder not configured for search")
@@ -300,10 +355,13 @@ class PaperLibraryService:
         # Embed the query
         query_embedding = self.embedder.embed_query(query)
 
+        # Fetch all matching papers (up to a reasonable max) for accurate total count
+        max_results = 1000
+
         # Search for FULL chunks (paper-level embeddings) for best ranking
         results = self.store.search(
             query_embedding=query_embedding,
-            limit=limit,
+            limit=max_results,
             chunk_types=["full"],
         )
 
@@ -311,7 +369,7 @@ class PaperLibraryService:
         if not results:
             results = self.store.search(
                 query_embedding=query_embedding,
-                limit=limit,
+                limit=max_results,
                 chunk_types=["abstract"],
             )
 
@@ -322,17 +380,27 @@ class PaperLibraryService:
             if paper_id not in seen_papers or result['score'] > seen_papers[paper_id]['score']:
                 seen_papers[paper_id] = result
 
-        # Get the matched paper IDs for chunk preview search
-        matched_paper_ids = list(seen_papers.keys())
+        # Sort by relevance score descending to get consistent ordering
+        sorted_papers = sorted(
+            seen_papers.items(),
+            key=lambda x: x[1]['score'],
+            reverse=True
+        )
 
-        # Search for best matching chunks within matched papers for preview
+        total_count = len(sorted_papers)
+
+        # Apply pagination
+        paginated_papers = sorted_papers[offset:offset + limit]
+        paginated_paper_ids = [p[0] for p in paginated_papers]
+
+        # Search for best matching chunks within paginated papers for preview
         preview_chunks = {}
-        if matched_paper_ids:
+        if paginated_paper_ids:
             chunk_results = self.store.search(
                 query_embedding=query_embedding,
-                limit=limit * 3,
+                limit=len(paginated_paper_ids) * 3,
                 chunk_types=["fine", "section", "abstract"],
-                paper_ids=matched_paper_ids,
+                paper_ids=paginated_paper_ids,
             )
             # Keep best chunk per paper for preview
             for chunk in chunk_results:
@@ -342,7 +410,7 @@ class PaperLibraryService:
 
         # Build response with paper info and preview
         search_results = []
-        for paper_id, result in seen_papers.items():
+        for paper_id, result in paginated_papers:
             chunk_stats = self.store.get_paper_chunk_stats(paper_id)
             chunk_count = sum(chunk_stats.values())
 
@@ -367,10 +435,7 @@ class PaperLibraryService:
                 'preview_chunk_type': preview.get('chunk_type'),
             })
 
-        # Sort by relevance score descending
-        search_results.sort(key=lambda x: x['relevance_score'], reverse=True)
-
-        return search_results
+        return search_results, total_count
 
     def get_paper(self, paper_id: str) -> Optional[PaperInfo]:
         """Get detailed information about a specific paper."""
@@ -474,6 +539,12 @@ class PaperLibraryService:
         if paper_id in failed_papers:
             del failed_papers[paper_id]
             checkpoint["failed_papers"] = failed_papers
+
+        # Remove from paper_metadata cache
+        paper_metadata = checkpoint.get("paper_metadata", {})
+        if paper_id in paper_metadata:
+            del paper_metadata[paper_id]
+            checkpoint["paper_metadata"] = paper_metadata
 
         self._save_checkpoint(checkpoint)
         result["checkpoint_updated"] = True
@@ -608,6 +679,30 @@ class PaperLibraryService:
             stats["total_chunks"] = stats.get("total_chunks", 0) + len(chunks)
             stats["total_papers_attempted"] = stats.get("total_papers_attempted", 0) + 1
             checkpoint["stats"] = stats
+
+            # Store paper metadata for fast retrieval (avoids scanning Qdrant)
+            if "paper_metadata" not in checkpoint:
+                checkpoint["paper_metadata"] = {}
+
+            # Compute chunk stats
+            chunk_stats: Dict[str, int] = {}
+            max_page = 0
+            for chunk in chunks:
+                chunk_type = chunk.chunk_type.value if hasattr(chunk.chunk_type, 'value') else str(chunk.chunk_type)
+                chunk_stats[chunk_type] = chunk_stats.get(chunk_type, 0) + 1
+                if chunk.page_numbers:
+                    max_page = max(max_page, max(chunk.page_numbers))
+
+            checkpoint["paper_metadata"][paper_id] = {
+                "title": chunks[0].title if chunks else "Unknown",
+                "authors": chunks[0].authors if chunks else [],
+                "year": chunks[0].year if chunks else None,
+                "filename": chunks[0].file_name if chunks else pdf_path.name,
+                "chunk_count": len(chunks),
+                "chunk_stats": chunk_stats,
+                "page_count": max_page,
+                "indexed_at": datetime.now().isoformat(),
+            }
 
             self._save_checkpoint(checkpoint)
 

@@ -8,8 +8,9 @@ export function ChatPage() {
   const { papers, queryOptions } = state;
   const selectedPaperIds = queryOptions.paperFilter;
 
-  // Get selected paper objects
+  // Get selected paper objects (may not find all if they came from search results)
   const selectedPapers = papers.filter(p => selectedPaperIds.includes(p.id));
+  const selectedCount = selectedPaperIds.length;
 
   const clearPaperFilter = () => {
     dispatch({ type: 'SET_QUERY_OPTIONS', payload: { paperFilter: [] } });
@@ -22,16 +23,16 @@ export function ChatPage() {
       </div>
 
       {/* Paper filter indicator */}
-      {selectedPaperIds.length > 0 && (
+      {selectedCount > 0 && (
         <div className="px-4 py-2 bg-blue-50 dark:bg-blue-900/20 border-t border-blue-100 dark:border-blue-800">
           <div className="max-w-4xl mx-auto flex items-center gap-2">
             <FileText className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
             <span className="text-sm text-blue-700 dark:text-blue-300">
               Searching in:{' '}
               <span className="font-medium">
-                {selectedPapers.length === 1
+                {selectedCount === 1 && selectedPapers.length === 1
                   ? selectedPapers[0]?.title
-                  : `${selectedPapers.length} papers`}
+                  : `${selectedCount} paper${selectedCount > 1 ? 's' : ''}`}
               </span>
             </span>
             {selectedPapers.length > 1 && selectedPapers.length <= 3 && (

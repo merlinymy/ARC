@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, type ReactNode } from 'react';
 import { HelpCircle } from 'lucide-react';
 
 interface TooltipProps {
-  content: string;
+  content: ReactNode;
   children?: ReactNode;
   position?: 'top' | 'bottom' | 'left' | 'right';
   showIcon?: boolean;
@@ -21,35 +21,48 @@ export function Tooltip({
   const tooltipRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Adjust position if tooltip would overflow viewport
+  // Reset position when tooltip closes
+  useEffect(() => {
+    if (!isVisible) {
+      setAdjustedPosition(position);
+    }
+  }, [isVisible, position]);
+
+  // Adjust position if tooltip would overflow viewport (only run once when visible)
   useEffect(() => {
     if (isVisible && tooltipRef.current && containerRef.current) {
-      const tooltipRect = tooltipRef.current.getBoundingClientRect();
+      // Use requestAnimationFrame to measure after paint
+      const frameId = requestAnimationFrame(() => {
+        if (!tooltipRef.current) return;
+        const tooltipRect = tooltipRef.current.getBoundingClientRect();
+        const containerRect = containerRef.current!.getBoundingClientRect();
 
-      let newPosition = position;
+        let newPosition = position;
 
-      // Check if tooltip overflows on top
-      if (position === 'top' && tooltipRect.top < 0) {
-        newPosition = 'bottom';
-      }
-      // Check if tooltip overflows on bottom
-      else if (position === 'bottom' && tooltipRect.bottom > window.innerHeight) {
-        newPosition = 'top';
-      }
-      // Check if tooltip overflows on left
-      else if (position === 'left' && tooltipRect.left < 0) {
-        newPosition = 'right';
-      }
-      // Check if tooltip overflows on right
-      else if (position === 'right' && tooltipRect.right > window.innerWidth) {
-        newPosition = 'left';
-      }
+        // Check if tooltip overflows on top - use container position to estimate
+        if (position === 'top' && containerRect.top < tooltipRect.height + 8) {
+          newPosition = 'bottom';
+        }
+        // Check if tooltip overflows on bottom
+        else if (position === 'bottom' && containerRect.bottom + tooltipRect.height + 8 > window.innerHeight) {
+          newPosition = 'top';
+        }
+        // Check if tooltip overflows on left
+        else if (position === 'left' && containerRect.left < tooltipRect.width + 8) {
+          newPosition = 'right';
+        }
+        // Check if tooltip overflows on right
+        else if (position === 'right' && containerRect.right + tooltipRect.width + 8 > window.innerWidth) {
+          newPosition = 'left';
+        }
 
-      if (newPosition !== adjustedPosition) {
-        setAdjustedPosition(newPosition);
-      }
+        if (newPosition !== position) {
+          setAdjustedPosition(newPosition);
+        }
+      });
+      return () => cancelAnimationFrame(frameId);
     }
-  }, [isVisible, position, adjustedPosition]);
+  }, [isVisible, position]);
 
   const positionClasses = {
     top: 'bottom-full left-1/2 -translate-x-1/2 mb-2',

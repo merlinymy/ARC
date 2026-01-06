@@ -20,6 +20,7 @@ import type {
   BatchUpload,
   UploadTask,
   BatchUploadSSEEvent,
+  CitationCheck,
 } from '../types';
 import { DEFAULT_QUERY_OPTIONS, PIPELINE_STEPS } from '../types';
 import { api, queryPapersStream, type StreamEvent } from '../services/api';
@@ -56,6 +57,8 @@ const initialState: AppState = {
   activeBatchUpload: null,
   isUploadPanelOpen: false,
   isUploadPanelMinimized: false,
+  // Streaming state
+  streamingState: null,
 };
 
 // Action types
@@ -95,7 +98,15 @@ type Action =
   | { type: 'SET_UPLOAD_PANEL_OPEN'; payload: boolean }
   | { type: 'SET_UPLOAD_PANEL_MINIMIZED'; payload: boolean }
   | { type: 'CANCEL_UPLOAD_TASK'; payload: string }
-  | { type: 'CLEAR_BATCH_UPLOAD' };
+  | { type: 'CLEAR_BATCH_UPLOAD' }
+  // Streaming actions
+  | { type: 'START_STREAMING'; payload: { messageId: string; conversationId: string } }
+  | { type: 'APPEND_STREAMING_CHUNK'; payload: string }
+  | { type: 'ADD_STREAMING_CITATION'; payload: CitationCheck }
+  | { type: 'STOP_STREAMING' }
+  | { type: 'UPDATE_MESSAGE_CONTENT'; payload: { conversationId: string; messageId: string; content: string } }
+  | { type: 'UPDATE_MESSAGE_CITATIONS'; payload: { conversationId: string; messageId: string; citationChecks: CitationCheck[] } }
+  | { type: 'UPDATE_MESSAGE'; payload: { conversationId: string; message: Message } };
 
 // Reducer
 function appReducer(state: AppState, action: Action): AppState {
@@ -305,6 +316,134 @@ function appReducer(state: AppState, action: Action): AppState {
         isUploadPanelMinimized: false,
       };
 
+    // Streaming reducers
+    case 'START_STREAMING':
+      return {
+        ...state,
+        streamingState: {
+          messageId: action.payload.messageId,
+          conversationId: action.payload.conversationId,
+          content: '',
+          citationChecks: [],
+          isStreaming: true,
+        },
+      };
+
+    case 'APPEND_STREAMING_CHUNK':
+      if (!state.streamingState) return state;
+      return {
+        ...state,
+        streamingState: {
+          ...state.streamingState,
+          content: state.streamingState.content + action.payload,
+        },
+        // Also update the message in the conversation
+        conversations: state.conversations.map((conv) =>
+          conv.id === state.streamingState?.conversationId
+            ? {
+                ...conv,
+                messages: conv.messages.map((msg) =>
+                  msg.id === state.streamingState?.messageId
+                    ? { ...msg, content: state.streamingState.content + action.payload }
+                    : msg
+                ),
+              }
+            : conv
+        ),
+      };
+
+    case 'ADD_STREAMING_CITATION':
+      if (!state.streamingState) return state;
+      return {
+        ...state,
+        streamingState: {
+          ...state.streamingState,
+          citationChecks: [...state.streamingState.citationChecks, action.payload],
+        },
+        // Also update the message metadata in the conversation
+        conversations: state.conversations.map((conv) =>
+          conv.id === state.streamingState?.conversationId
+            ? {
+                ...conv,
+                messages: conv.messages.map((msg) =>
+                  msg.id === state.streamingState?.messageId
+                    ? {
+                        ...msg,
+                        metadata: {
+                          ...msg.metadata,
+                          citationChecks: [...(state.streamingState?.citationChecks || []), action.payload],
+                        },
+                      }
+                    : msg
+                ),
+              }
+            : conv
+        ),
+      };
+
+    case 'STOP_STREAMING':
+      return {
+        ...state,
+        streamingState: null,
+      };
+
+    case 'UPDATE_MESSAGE_CONTENT':
+      return {
+        ...state,
+        conversations: state.conversations.map((conv) =>
+          conv.id === action.payload.conversationId
+            ? {
+                ...conv,
+                messages: conv.messages.map((msg) =>
+                  msg.id === action.payload.messageId
+                    ? { ...msg, content: action.payload.content }
+                    : msg
+                ),
+              }
+            : conv
+        ),
+      };
+
+    case 'UPDATE_MESSAGE_CITATIONS':
+      return {
+        ...state,
+        conversations: state.conversations.map((conv) =>
+          conv.id === action.payload.conversationId
+            ? {
+                ...conv,
+                messages: conv.messages.map((msg) =>
+                  msg.id === action.payload.messageId
+                    ? {
+                        ...msg,
+                        metadata: {
+                          ...msg.metadata,
+                          citationChecks: action.payload.citationChecks,
+                        },
+                      }
+                    : msg
+                ),
+              }
+            : conv
+        ),
+      };
+
+    case 'UPDATE_MESSAGE':
+      return {
+        ...state,
+        conversations: state.conversations.map((conv) =>
+          conv.id === action.payload.conversationId
+            ? {
+                ...conv,
+                messages: conv.messages.map((msg) =>
+                  msg.id === action.payload.message.id
+                    ? action.payload.message
+                    : msg
+                ),
+              }
+            : conv
+        ),
+      };
+
     default:
       return state;
   }
@@ -421,21 +560,74 @@ export function AppProvider({ children }: { children: ReactNode }) {
       payload: { conversationId, message: queryMessage },
     });
 
+    // Create a placeholder response message for streaming
+    const responseMessageId = generateId();
+    const placeholderMessage: Message = {
+      id: responseMessageId,
+      type: 'response',
+      content: '',
+      timestamp: new Date(),
+      metadata: {
+        citationChecks: [], // Will be populated as citations are verified
+      },
+    };
+    dispatch({
+      type: 'ADD_MESSAGE',
+      payload: { conversationId, message: placeholderMessage },
+    });
+
+    // Start streaming state
+    dispatch({
+      type: 'START_STREAMING',
+      payload: { messageId: responseMessageId, conversationId },
+    });
+
     try {
       let completedSteps: Set<PipelineStepName> = new Set();
+      let streamedContent = '';
+      const streamedCitations: CitationCheck[] = [];
 
       await queryPapersStream(
         query,
         (event: StreamEvent) => {
           if (event.type === 'progress') {
             const stepName = event.step as PipelineStepName;
+            // Cast data to Record for flexible property access
+            const data = event.data as Record<string, unknown>;
+
+            // Handle streaming answer chunks
+            if (stepName === 'answer_chunk' && data?.chunk) {
+              const chunk = data.chunk as string;
+              streamedContent += chunk;
+              dispatch({ type: 'APPEND_STREAMING_CHUNK', payload: chunk });
+              return;
+            }
+
+            // Handle citation verification results
+            if (stepName === 'citation_verified' && data) {
+              const citationCheck: CitationCheck = {
+                citation_id: data.citation_id as number,
+                claim: data.claim as string,
+                confidence: data.confidence as number,
+                is_valid: data.is_valid as boolean,
+                explanation: data.explanation as string,
+              };
+              streamedCitations.push(citationCheck);
+              dispatch({ type: 'ADD_STREAMING_CITATION', payload: citationCheck });
+              return;
+            }
+
+            // Skip answer_complete - we already have the content from chunks
+            if (stepName === 'answer_complete') {
+              return;
+            }
 
             // Mark this step as active and previous steps as completed
             PIPELINE_STEPS.forEach((s) => {
               if (s.name === stepName) {
                 dispatch({
                   type: 'UPDATE_PIPELINE_STEP',
-                  payload: { step: s.name, status: 'active', data: event.data },
+                  payload: { step: s.name, status: 'active', data },
                 });
               } else if (completedSteps.has(s.name)) {
                 // Already completed
@@ -447,20 +639,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
                   completedSteps.add(s.name);
                   dispatch({
                     type: 'UPDATE_PIPELINE_STEP',
-                    payload: { step: s.name, status: event.data?.skipped ? 'skipped' : 'completed' },
+                    payload: { step: s.name, status: data?.skipped ? 'skipped' : 'completed' },
                   });
                 }
               }
             });
 
             // Mark step completed when we get data (not just "starting")
-            if (event.data && event.data.status !== 'starting') {
+            if (data && data.status !== 'starting') {
               completedSteps.add(stepName);
               // Determine status: failed if success is explicitly false, skipped if marked, otherwise completed
               let status: 'completed' | 'skipped' | 'failed' = 'completed';
-              if (event.data.success === false) {
+              if (data.success === false) {
                 status = 'failed';
-              } else if (event.data.skipped) {
+              } else if (data.skipped) {
                 status = 'skipped';
               }
               dispatch({
@@ -468,35 +660,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 payload: {
                   step: stepName,
                   status,
-                  data: event.data
+                  data
                 },
               });
             }
           } else if (event.type === 'complete') {
             const latency = performance.now() - startTime;
 
+            // Stop streaming state
+            dispatch({ type: 'STOP_STREAMING' });
+
             // Mark all remaining steps as completed
             dispatch({ type: 'SET_PIPELINE_PROGRESS', payload: null });
 
-            // Add response message
-            const responseMessage: Message = {
-              id: generateId(),
-              type: 'response',
-              content: event.answer,
-              timestamp: new Date(),
-              metadata: {
-                queryType: event.query_type as QueryType,
-                expandedQuery: event.expanded_query,
-                sources: event.sources,
-                retrievalCount: event.retrieval_count,
-                rerankedCount: event.reranked_count,
-                latency,
-                warnings: event.warnings,
-              },
-            };
+            // Update the existing response message with final content and metadata
+            // Use streamed content if available, otherwise fall back to event.answer
+            const finalContent = streamedContent || event.answer;
+            const finalCitations = streamedCitations.length > 0 ? streamedCitations : event.citation_checks;
+
+            // Update the message with complete data
             dispatch({
-              type: 'ADD_MESSAGE',
-              payload: { conversationId: conversationId!, message: responseMessage },
+              type: 'UPDATE_MESSAGE',
+              payload: {
+                conversationId: conversationId!,
+                message: {
+                  id: responseMessageId,
+                  type: 'response',
+                  content: finalContent,
+                  timestamp: new Date(),
+                  metadata: {
+                    queryType: event.query_type as QueryType,
+                    expandedQuery: event.expanded_query,
+                    sources: event.sources,
+                    retrievalCount: event.retrieval_count,
+                    rerankedCount: event.reranked_count,
+                    latency,
+                    warnings: event.warnings,
+                    citationChecks: finalCitations,
+                  },
+                },
+              },
             });
 
             // Update conversation title if it's the first query
@@ -508,6 +711,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               });
             }
           } else if (event.type === 'error') {
+            dispatch({ type: 'STOP_STREAMING' });
             throw new Error(event.message);
           }
         },
@@ -540,6 +744,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'SET_LOADING', payload: false });
       dispatch({ type: 'SET_CURRENT_QUERY', payload: '' });
       dispatch({ type: 'SET_PIPELINE_PROGRESS', payload: null });
+      // Refresh stats to update query count and cache hit rate
+      try {
+        const stats = await api.getStats();
+        dispatch({ type: 'SET_STATS', payload: stats });
+      } catch (error) {
+        console.error('Failed to refresh stats:', error);
+      }
     }
   }, [state.activeConversationId, state.conversations, state.queryOptions]);
 

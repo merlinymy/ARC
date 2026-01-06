@@ -33,8 +33,9 @@ from .cache import RAGCache
 from .hyde import HyDE, HyDEEmbedder
 from .query_rewriter import QueryRewriter
 from .entity_extractor import EntityExtractor, LLMEntityExtractor
-from .citation_verifier import CitationVerifier
+from .citation_verifier import CitationVerifier, VerificationResult, StreamingCitationVerifier
 from .conversation_memory import ConversationMemory
+from .analytics import get_analytics_tracker, StepTimings, CitationResult
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,16 @@ def retry_with_exponential_backoff(
 
 
 @dataclass
+class CitationCheckResult:
+    """A single citation verification result for API response."""
+    citation_id: int
+    claim: str
+    confidence: float
+    is_valid: bool
+    explanation: str
+
+
+@dataclass
 class QueryResult:
     """Result from the query pipeline."""
     query: str
@@ -122,6 +133,8 @@ class QueryResult:
     entities_extracted: List[str] = field(default_factory=list)
     # Pipeline warnings (e.g., rate limits, degraded service)
     warnings: List[str] = field(default_factory=list)
+    # Citation verification details for inline display
+    citation_checks: List[CitationCheckResult] = field(default_factory=list)
 
 
 # Query-type-specific system prompts (instructions only, no query/sources)
@@ -306,6 +319,15 @@ class QueryEngine:
         used_hyde = False
         rewritten_query = query
         entities_extracted = []
+        entities_by_category = {}  # For analytics
+
+        # Timing tracking for analytics
+        timing_query_processing_start = time.perf_counter()
+        timing_embedding_ms = 0.0
+        timing_retrieval_ms = 0.0
+        timing_reranking_ms = 0.0
+        timing_generation_ms = 0.0
+        verification_result = None
 
         # Determine effective settings (overrides take precedence over system defaults)
         use_hyde = enable_hyde_override if enable_hyde_override is not None else (self.hyde_embedder is not None)
@@ -347,6 +369,7 @@ class QueryEngine:
         if self.entity_extractor:
             entities = self.entity_extractor.extract(rewritten_query)
             entities_extracted = entities.all_entities()
+            entities_by_category = entities.to_dict()  # For analytics
             if entities_extracted:
                 logger.debug(f"Extracted entities: {entities_extracted[:5]}")
                 emit("entities", {"found": entities_extracted})
@@ -417,6 +440,9 @@ class QueryEngine:
         else:
             emit("expansion", {"added_terms": [], "expanded": expanded_query, "skipped": True})
 
+        # End query processing timing (steps 1-4)
+        timing_query_processing_ms = (time.perf_counter() - timing_query_processing_start) * 1000
+
         # Step 5: Get retrieval strategy
         strategy = RETRIEVAL_STRATEGIES[query_type]
         chunk_types = strategy["chunk_types"]
@@ -461,6 +487,7 @@ class QueryEngine:
         if not results:
             # Step 7: Embed query (with optional HyDE, respects override)
             emit("hyde", {"status": "starting"})
+            timing_embedding_start = time.perf_counter()
             if use_hyde and self.hyde_embedder:
                 query_embedding, _ = self.hyde_embedder.embed_query_with_hyde(
                     query=expanded_query,
@@ -480,8 +507,10 @@ class QueryEngine:
                         self.cache.set_embedding(expanded_query, query_embedding)
                 else:
                     query_embedding = self.embedder.embed_query(expanded_query)
+            timing_embedding_ms = (time.perf_counter() - timing_embedding_start) * 1000
 
             # Step 8: Search (hybrid or dense-only)
+            timing_retrieval_start = time.perf_counter()
             if self.enable_hybrid_search and hasattr(self.store, 'hybrid_search'):
                 # Hybrid search (dense + sparse)
                 results = self.store.hybrid_search(
@@ -501,6 +530,7 @@ class QueryEngine:
                     section_filter=section_filter,
                     paper_ids=paper_ids,
                 )
+            timing_retrieval_ms = (time.perf_counter() - timing_retrieval_start) * 1000
 
             # Cache search results
             if self.cache and results:
@@ -523,6 +553,7 @@ class QueryEngine:
 
         # Step 10: Rerank
         emit("reranking", {"status": "starting", "input_count": len(results) if results else 0})
+        timing_reranking_start = time.perf_counter()
         warnings: List[str] = []
         if results:
             rerank_result = self.reranker.rerank_with_metadata(
@@ -536,6 +567,7 @@ class QueryEngine:
                 warnings.append(rerank_result.error)
         else:
             reranked = []
+        timing_reranking_ms = (time.perf_counter() - timing_reranking_start) * 1000
 
         reranked_count = len(reranked)
         logger.info(f"Reranked to {reranked_count} chunks")
@@ -548,21 +580,166 @@ class QueryEngine:
         # Step 11: Expand fine chunks with parent context
         expanded_sources = self._expand_fine_chunks(reranked)
 
-        # Step 12: Generate answer
+        # Step 12: Generate answer (with streaming if callback provided)
         emit("generation", {"status": "starting", "source_count": len(expanded_sources)})
+        timing_generation_start = time.perf_counter()
+
+        # Prepare streaming citation verification if enabled
+        streaming_citation_checks: List[CitationCheckResult] = []
+        streaming_verifier = None
+        use_streaming_verification = (
+            progress_callback and
+            use_citation_check and
+            self.citation_verifier and
+            expanded_sources
+        )
+
+        if use_streaming_verification:
+            # Create callback to emit citation verification results in real-time
+            def on_citation_verified(check):
+                check_result = CitationCheckResult(
+                    citation_id=check.citation_id,
+                    claim=check.claim,
+                    confidence=check.confidence,
+                    is_valid=check.is_valid,
+                    explanation=check.explanation,
+                )
+                streaming_citation_checks.append(check_result)
+                emit("citation_verified", {
+                    "citation_id": check.citation_id,
+                    "claim": check.claim,
+                    "confidence": check.confidence,
+                    "is_valid": check.is_valid,
+                    "explanation": check.explanation,
+                })
+
+            # Format sources for verification (need 'text' and 'title' keys)
+            verification_sources = [
+                {
+                    'text': s.get('chunk_text', ''),
+                    'title': s.get('paper_title', f'Source {i+1}'),
+                }
+                for i, s in enumerate(expanded_sources)
+            ]
+
+            streaming_verifier = StreamingCitationVerifier(
+                verifier=self.citation_verifier,
+                sources=verification_sources,
+                on_citation_verified=on_citation_verified,
+            )
+
+        # Create stream callback that emits answer chunks AND processes for citations
+        def answer_stream_callback(chunk: str):
+            emit("answer_chunk", {"chunk": chunk})
+            # Process chunk for real-time citation verification
+            if streaming_verifier:
+                streaming_verifier.process_chunk(chunk)
+
         answer = self._generate_answer(
             query=query,
             query_type=query_type,
             sources=expanded_sources,
+            stream_callback=answer_stream_callback if progress_callback else None,
         )
+        timing_generation_ms = (time.perf_counter() - timing_generation_start) * 1000
         emit("generation", {"status": "complete"})
+        emit("answer_complete", {"answer": answer})
+
+        # Flush streaming verifier to catch any remaining citations
+        if streaming_verifier:
+            streaming_verifier.flush()
+
+        # Final pass: verify any citations that weren't caught during streaming
+        if use_streaming_verification and answer:
+            # Extract all citation IDs from the final answer
+            all_citation_ids = set()
+            citation_matches = self.citation_verifier.extract_citations(answer)
+            for source_id in citation_matches.keys():
+                all_citation_ids.add(source_id)
+
+            # Find which citations weren't verified during streaming
+            verified_ids = {c.citation_id for c in streaming_citation_checks}
+            missing_ids = all_citation_ids - verified_ids
+
+            if missing_ids:
+                logger.debug(f"Final pass: verifying {len(missing_ids)} missed citations: {missing_ids}")
+                verification_sources = [
+                    {
+                        'text': s.get('chunk_text', ''),
+                        'title': s.get('paper_title', f'Source {i+1}'),
+                    }
+                    for i, s in enumerate(expanded_sources)
+                ]
+                for source_id in missing_ids:
+                    # Get all claims for this citation from the full answer
+                    claims = citation_matches.get(source_id, [])
+                    for claim in claims:
+                        check = self.citation_verifier.verify_single_citation(
+                            claim=claim,
+                            source_id=source_id,
+                            sources=verification_sources,
+                        )
+                        if check:
+                            check_result = CitationCheckResult(
+                                citation_id=check.citation_id,
+                                claim=check.claim,
+                                confidence=check.confidence,
+                                is_valid=check.is_valid,
+                                explanation=check.explanation,
+                            )
+                            streaming_citation_checks.append(check_result)
+                            emit("citation_verified", {
+                                "citation_id": check.citation_id,
+                                "claim": check.claim,
+                                "confidence": check.confidence,
+                                "is_valid": check.is_valid,
+                                "explanation": check.explanation,
+                            })
 
         # Step 13: Verify citations (if enabled, respects override)
         emit("verification", {"status": "starting"})
         citation_verified = False
-        if use_citation_check and self.citation_verifier and expanded_sources:
+        citation_checks: List[CitationCheckResult] = []
+
+        if use_streaming_verification:
+            # Use results from streaming verification
+            citation_checks = streaming_citation_checks
+            if citation_checks:
+                overall_confidence = sum(c.confidence for c in citation_checks) / len(citation_checks)
+                citation_verified = overall_confidence >= 0.7
+                # Create a VerificationResult for analytics
+                verification_result = VerificationResult(
+                    total_citations=len(citation_checks),
+                    valid_citations=sum(1 for c in citation_checks if c.is_valid),
+                    invalid_citations=sum(1 for c in citation_checks if not c.is_valid),
+                    checks=[],  # Original checks not needed for analytics
+                    overall_confidence=overall_confidence,
+                    warnings=[],
+                )
+            emit("verification", {"verified": citation_verified, "warnings": []})
+        elif use_citation_check and self.citation_verifier and expanded_sources:
+            # Non-streaming fallback: verify all citations after answer is complete
             verification = self.citation_verifier.verify_answer(answer, expanded_sources)
             citation_verified = verification.is_trustworthy
+            verification_result = verification  # Store for analytics
+            # Convert checks to API-friendly format and emit each one
+            for check in verification.checks:
+                check_result = CitationCheckResult(
+                    citation_id=check.citation_id,
+                    claim=check.claim,
+                    confidence=check.confidence,
+                    is_valid=check.is_valid,
+                    explanation=check.explanation,
+                )
+                citation_checks.append(check_result)
+                # Emit individual citation verification result
+                emit("citation_verified", {
+                    "citation_id": check.citation_id,
+                    "claim": check.claim,
+                    "confidence": check.confidence,
+                    "is_valid": check.is_valid,
+                    "explanation": check.explanation,
+                })
             if not citation_verified:
                 logger.warning(f"Citation verification warnings: {verification.warnings}")
             emit("verification", {"verified": citation_verified, "warnings": verification.warnings if not citation_verified else []})
@@ -573,6 +750,42 @@ class QueryEngine:
         if self.conversation_memory:
             self.conversation_memory.add_user_message(query)
             self.conversation_memory.add_assistant_message(answer, sources=expanded_sources)
+
+        # Step 15: Record analytics
+        try:
+            analytics = get_analytics_tracker()
+            step_timings = StepTimings(
+                query_processing_ms=timing_query_processing_ms,
+                embedding_ms=timing_embedding_ms,
+                retrieval_ms=timing_retrieval_ms,
+                reranking_ms=timing_reranking_ms,
+                generation_ms=timing_generation_ms,
+            )
+            citation_analytics = None
+            if verification_result and verification_result.checks:
+                # Count citations by confidence threshold (mutually exclusive)
+                # Verified: confidence >= 0.7 (high confidence)
+                # Partial: 0.3 <= confidence < 0.7 (moderate confidence)
+                # Failed: confidence < 0.3 (low confidence)
+                verified_count = sum(1 for c in verification_result.checks if c.confidence >= 0.7)
+                partial_count = sum(1 for c in verification_result.checks if 0.3 <= c.confidence < 0.7)
+                failed_count = sum(1 for c in verification_result.checks if c.confidence < 0.3)
+
+                citation_analytics = CitationResult(
+                    overall_score=verification_result.overall_confidence,
+                    total_citations=len(verification_result.checks),
+                    valid_citations=verified_count,
+                    partial_citations=partial_count,
+                    invalid_citations=failed_count,
+                )
+            analytics.record_query(
+                query_type=query_type.value,
+                step_timings=step_timings,
+                citation_result=citation_analytics,
+                entities=entities_by_category if entities_by_category else None,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record analytics: {e}")
 
         return QueryResult(
             query=query,
@@ -589,6 +802,7 @@ class QueryEngine:
             citation_verified=citation_verified,
             entities_extracted=entities_extracted,
             warnings=warnings,
+            citation_checks=citation_checks,
         )
 
     def _detect_targeted_query_type(self, query: str) -> QueryType:
@@ -672,11 +886,21 @@ class QueryEngine:
         query: str,
         query_type: QueryType,
         sources: List[Dict[str, Any]],
+        stream_callback: Optional[callable] = None,
     ) -> str:
         """Generate answer using Claude with query-type-specific prompt.
 
         Includes conversation history for multi-turn context and retry logic
         for rate limits and transient errors.
+
+        Args:
+            query: The user query
+            query_type: Classification of the query type
+            sources: Retrieved source documents
+            stream_callback: Optional callback(chunk: str) for streaming response chunks
+
+        Returns:
+            Complete answer text
         """
         if not sources:
             return "I couldn't find relevant information in the literature to answer this question."
@@ -704,18 +928,33 @@ Retrieved Sources:
 Please provide your answer based on the sources above."""
         messages.append({"role": "user", "content": current_message})
 
-        def make_api_call():
-            return self.anthropic.messages.create(
-                model=self.claude_model,
-                max_tokens=2048,
-                temperature=0.3,
-                system=system_prompt,
-                messages=messages,
-            )
-
         try:
-            response = retry_with_exponential_backoff(make_api_call)
-            return response.content[0].text
+            if stream_callback:
+                # Use streaming API
+                full_response = []
+                with self.anthropic.messages.stream(
+                    model=self.claude_model,
+                    max_tokens=2048,
+                    temperature=0.3,
+                    system=system_prompt,
+                    messages=messages,
+                ) as stream:
+                    for text in stream.text_stream:
+                        full_response.append(text)
+                        stream_callback(text)
+                return "".join(full_response)
+            else:
+                # Non-streaming fallback
+                def make_api_call():
+                    return self.anthropic.messages.create(
+                        model=self.claude_model,
+                        max_tokens=2048,
+                        temperature=0.3,
+                        system=system_prompt,
+                        messages=messages,
+                    )
+                response = retry_with_exponential_backoff(make_api_call)
+                return response.content[0].text
 
         except (RateLimitError, APIStatusError) as e:
             logger.error(f"Answer generation failed after retries: {e}")

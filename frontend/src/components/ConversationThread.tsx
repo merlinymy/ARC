@@ -1,8 +1,11 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { MessageSquare, Sparkles, Check, Loader2, SkipForward, AlertTriangle } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { ResponseCard } from './ResponseCard';
 import type { PipelineStepInfo } from '../types';
+
+// Threshold in pixels - if user is within this distance from bottom, auto-scroll
+const SCROLL_THRESHOLD = 150;
 
 // Pipeline step status icon
 function StepIcon({ status }: { status: PipelineStepInfo['status'] }) {
@@ -101,19 +104,54 @@ function PipelineProgress({ steps }: { steps: PipelineStepInfo[] }) {
 
 export function ConversationThread() {
   const { state } = useApp();
-  const { conversations, activeConversationId, isLoading, pipelineProgress } = state;
+  const { conversations, activeConversationId, isLoading, pipelineProgress, streamingState } = state;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
+  const lastMessageCountRef = useRef(0);
 
   const activeConversation = conversations.find(
     (c) => c.id === activeConversationId
   );
 
-  // Auto-scroll to bottom on new messages
+  // Check if user is near bottom of scroll container
+  const checkIfNearBottom = useCallback(() => {
+    if (!scrollRef.current) return true;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    return scrollHeight - scrollTop - clientHeight < SCROLL_THRESHOLD;
+  }, []);
+
+  // Track scroll position to know if user scrolled up
   useEffect(() => {
-    if (scrollRef.current) {
+    const container = scrollRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      isNearBottomRef.current = checkIfNearBottom();
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [checkIfNearBottom]);
+
+  // Auto-scroll only when a new message is added (not during streaming content updates)
+  useEffect(() => {
+    const messageCount = activeConversation?.messages.length ?? 0;
+    const isNewMessage = messageCount > lastMessageCountRef.current;
+    lastMessageCountRef.current = messageCount;
+
+    // Always scroll to bottom when a new message is added
+    if (isNewMessage && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      isNearBottomRef.current = true;
+    }
+  }, [activeConversation?.messages.length]);
+
+  // During streaming, only scroll if user was already near bottom
+  useEffect(() => {
+    if (streamingState?.isStreaming && isNearBottomRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [activeConversation?.messages]);
+  }, [streamingState?.content]);
 
   // Empty state
   if (!activeConversation || activeConversation.messages.length === 0) {

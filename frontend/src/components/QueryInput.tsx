@@ -16,6 +16,7 @@ import type { QueryType } from '../types';
 const QUERY_TYPES: { value: QueryType | 'auto'; label: string }[] = [
   { value: 'auto', label: 'Auto-detect (Recommended)' },
   { value: 'factual', label: 'Factual' },
+  { value: 'framing', label: 'Framing' },
   { value: 'methods', label: 'Methods' },
   { value: 'summary', label: 'Summary' },
   { value: 'comparative', label: 'Comparative' },

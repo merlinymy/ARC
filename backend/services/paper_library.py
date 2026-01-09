@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 # Checkpoint file path (same as index_papers.py)
 CHECKPOINT_FILE = Path("data/indexing_checkpoint.json")
 
+# Cache for checkpoint data with modification time tracking
+_checkpoint_cache: Dict[str, Any] = {}
+_checkpoint_mtime: float = 0.0
+
 
 @dataclass
 class PaperInfo:
@@ -29,6 +33,7 @@ class PaperInfo:
     title: str
     authors: List[str]
     year: Optional[int]
+    doi: Optional[str]
     filename: str
     page_count: int
     chunk_count: int
@@ -36,6 +41,7 @@ class PaperInfo:
     indexed_at: Optional[datetime]
     status: str  # 'indexed', 'indexing', 'error', 'pending'
     error_message: Optional[str] = None
+    file_size_bytes: int = 0  # Actual PDF file size in bytes
 
 
 @dataclass
@@ -181,10 +187,11 @@ class PaperLibraryService:
             Dict with status and count of papers backfilled
         """
         checkpoint = self._load_checkpoint()
-        existing_metadata = checkpoint.get("paper_metadata", {})
 
-        # Skip if already populated (unless forced)
-        if existing_metadata and not force:
+        # Check if paper_metadata key exists (not just if it's non-empty)
+        # This prevents backfill from running after every upload when cache is being built incrementally
+        if "paper_metadata" in checkpoint and not force:
+            existing_metadata = checkpoint.get("paper_metadata", {})
             return {"status": "skipped", "count": len(existing_metadata), "message": "Cache already exists"}
 
         logger.info("Backfilling paper metadata cache from Qdrant...")
@@ -217,21 +224,49 @@ class PaperLibraryService:
         return {"status": "success", "count": len(paper_metadata)}
 
     def _load_checkpoint(self) -> Dict[str, Any]:
-        """Load the indexing checkpoint file."""
+        """Load the indexing checkpoint file with caching and auto-reload.
+
+        Automatically detects when the checkpoint file is modified by external scripts
+        (like index_papers.py) and reloads the cache to stay in sync.
+        """
+        global _checkpoint_cache, _checkpoint_mtime
+
         if CHECKPOINT_FILE.exists():
             try:
-                with open(CHECKPOINT_FILE) as f:
-                    return json.load(f)
+                # Check if file was modified since last load
+                current_mtime = CHECKPOINT_FILE.stat().st_mtime
+                cache_is_stale = current_mtime > _checkpoint_mtime
+
+                if not _checkpoint_cache or cache_is_stale:
+                    # Cache is empty or file was modified - reload from disk
+                    with open(CHECKPOINT_FILE) as f:
+                        _checkpoint_cache = json.load(f)
+                        _checkpoint_mtime = current_mtime
+
+                    if cache_is_stale:
+                        logger.info("Checkpoint file was modified externally - reloaded cache")
+
+                return _checkpoint_cache.copy()  # Return a copy to prevent mutations
+
             except Exception as e:
                 logger.warning(f"Failed to load checkpoint: {e}")
+
         return {"indexed_papers": [], "failed_papers": {}, "stats": {}}
 
     def _save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Save the indexing checkpoint file."""
+        """Save the indexing checkpoint file and update cache."""
+        global _checkpoint_cache, _checkpoint_mtime
+
         CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
         checkpoint["stats"]["last_updated"] = datetime.now().isoformat()
+
         with open(CHECKPOINT_FILE, "w") as f:
             json.dump(checkpoint, f, indent=2)
+
+        # Update cache and mtime to reflect our own write
+        _checkpoint_cache = checkpoint.copy()
+        if CHECKPOINT_FILE.exists():
+            _checkpoint_mtime = CHECKPOINT_FILE.stat().st_mtime
 
     def _get_pdf_path(self, paper_id: str) -> Optional[Path]:
         """Find the PDF file for a given paper ID.
@@ -252,9 +287,14 @@ class PaperLibraryService:
         return None
 
     def list_papers(
-        self, offset: int = 0, limit: Optional[int] = None
+        self,
+        offset: int = 0,
+        limit: Optional[int] = None,
+        search: Optional[str] = None,
+        sort_by: str = "indexed_at",
+        sort_order: str = "desc",
     ) -> PaginatedPapers:
-        """List papers in the library with pagination.
+        """List papers in the library with pagination and optional filtering.
 
         Uses cached metadata from checkpoint file for fast retrieval.
         Automatically backfills cache from Qdrant if empty.
@@ -262,28 +302,68 @@ class PaperLibraryService:
         Args:
             offset: Number of papers to skip
             limit: Maximum papers to return (None for all - backwards compatible)
+            search: Optional search query to filter by title, filename, or author (case-insensitive)
+            sort_by: Field to sort by (title, year, chunk_count, indexed_at)
+            sort_order: Sort order (asc or desc)
 
         Returns:
             PaginatedPapers with papers list and pagination metadata
         """
         checkpoint = self._load_checkpoint()
-        paper_metadata = checkpoint.get("paper_metadata", {})
 
-        # Backfill cache if empty (one-time slow operation)
-        if not paper_metadata:
+        # Backfill cache if it doesn't exist (one-time slow operation)
+        # Note: We check if the key exists, not if it's empty, because the cache is built incrementally
+        if "paper_metadata" not in checkpoint:
             self.backfill_paper_metadata()
             checkpoint = self._load_checkpoint()
-            paper_metadata = checkpoint.get("paper_metadata", {})
+
+        paper_metadata = checkpoint.get("paper_metadata", {})
 
         indexed_set = set(checkpoint.get("indexed_papers", []))
         failed_papers = checkpoint.get("failed_papers", {})
 
-        # Get all paper IDs sorted by indexed_at (newest first)
+        # Start with all paper IDs
+        all_paper_ids = list(paper_metadata.keys())
+
+        # Apply text-based filtering if search query provided
+        if search:
+            search_lower = search.lower()
+            filtered_paper_ids = []
+            for pid in all_paper_ids:
+                meta = paper_metadata[pid]
+                # Search in title, filename, and authors
+                title = meta.get("title", "").lower()
+                filename = meta.get("filename", "").lower()
+                authors = " ".join(meta.get("authors", [])).lower()
+
+                if (search_lower in title or
+                    search_lower in filename or
+                    search_lower in authors):
+                    filtered_paper_ids.append(pid)
+            all_paper_ids = filtered_paper_ids
+
+        # Apply sorting based on parameters
+        def get_sort_key(pid: str):
+            meta = paper_metadata[pid]
+            if sort_by == "title":
+                return meta.get("title", "").lower()
+            elif sort_by == "year":
+                return meta.get("year", 0) or 0
+            elif sort_by == "chunk_count":
+                chunk_stats = meta.get("chunk_stats", {})
+                return meta.get("chunk_count", sum(chunk_stats.values()))
+            elif sort_by == "indexed_at":
+                return meta.get("indexed_at", "")
+            else:
+                # Default to indexed_at
+                return meta.get("indexed_at", "")
+
         all_paper_ids = sorted(
-            paper_metadata.keys(),
-            key=lambda pid: paper_metadata[pid].get("indexed_at", ""),
-            reverse=True
+            all_paper_ids,
+            key=get_sort_key,
+            reverse=(sort_order == "desc")
         )
+
         total_count = len(all_paper_ids)
 
         # Apply pagination
@@ -310,11 +390,18 @@ class PaperLibraryService:
             indexed_at_str = meta.get("indexed_at")
             indexed_at = datetime.fromisoformat(indexed_at_str) if indexed_at_str else None
 
+            # Get actual file size from disk
+            file_size_bytes = 0
+            pdf_path = self.get_pdf_path(paper_id)
+            if pdf_path and pdf_path.exists():
+                file_size_bytes = pdf_path.stat().st_size
+
             papers.append(PaperInfo(
                 paper_id=paper_id,
                 title=meta.get("title", "Unknown"),
                 authors=meta.get("authors", []),
                 year=meta.get("year"),
+                doi=meta.get("doi"),
                 filename=meta.get("filename", ""),
                 page_count=meta.get("page_count", 0),
                 chunk_count=chunk_count,
@@ -322,6 +409,7 @@ class PaperLibraryService:
                 indexed_at=indexed_at,
                 status=status,
                 error_message=error_msg,
+                file_size_bytes=file_size_bytes,
             ))
 
         has_more = (offset + len(papers)) < total_count
@@ -419,6 +507,12 @@ class PaperLibraryService:
             chunk_text = preview.get('text', '')
             preview_text = chunk_text[:300] + '...' if len(chunk_text) > 300 else chunk_text
 
+            # Get actual file size from disk
+            file_size_bytes = 0
+            pdf_path = self.get_pdf_path(paper_id)
+            if pdf_path and pdf_path.exists():
+                file_size_bytes = pdf_path.stat().st_size
+
             search_results.append({
                 'paper_id': paper_id,
                 'title': result.get('title', 'Unknown'),
@@ -428,6 +522,7 @@ class PaperLibraryService:
                 'relevance_score': result['score'],
                 'chunk_count': chunk_count,
                 'status': 'indexed' if chunk_count > 0 else 'pending',
+                'file_size_bytes': file_size_bytes,
                 # Preview info
                 'preview_text': preview_text,
                 'preview_section': preview.get('section_name'),
@@ -477,11 +572,18 @@ class PaperLibraryService:
             status = "pending"
             error_msg = None
 
+        # Get actual file size from disk
+        file_size_bytes = 0
+        pdf_path = self.get_pdf_path(paper_id)
+        if pdf_path and pdf_path.exists():
+            file_size_bytes = pdf_path.stat().st_size
+
         return PaperInfo(
             paper_id=paper_id,
             title=first_chunk.get('title', 'Unknown'),
             authors=first_chunk.get('authors', []),
             year=first_chunk.get('year'),
+            doi=first_chunk.get('doi'),
             filename=first_chunk.get('file_name', ''),
             page_count=page_count,
             chunk_count=chunk_count,
@@ -489,11 +591,108 @@ class PaperLibraryService:
             indexed_at=None,
             status=status,
             error_message=error_msg,
+            file_size_bytes=file_size_bytes,
         )
 
     def get_pdf_path(self, paper_id: str) -> Optional[Path]:
         """Get the file path for a paper's PDF."""
         return self._get_pdf_path(paper_id)
+
+    def update_paper_metadata(
+        self,
+        paper_id: str,
+        title: Optional[str] = None,
+        authors: Optional[List[str]] = None,
+        year: Optional[int] = None,
+        filename: Optional[str] = None,
+    ) -> Optional[PaperInfo]:
+        """Update paper metadata.
+
+        Updates:
+        1. Checkpoint cache
+        2. All chunks in Qdrant
+
+        Args:
+            paper_id: Paper ID
+            title: New title (if provided)
+            authors: New authors list (if provided)
+            year: New year (if provided)
+            filename: New filename (if provided)
+
+        Returns:
+            Updated PaperInfo object or None if not found
+        """
+        checkpoint = self._load_checkpoint()
+        paper_metadata = checkpoint.get("paper_metadata", {})
+
+        if paper_id not in paper_metadata:
+            return None
+
+        # Update checkpoint metadata
+        meta = paper_metadata[paper_id]
+        if title is not None:
+            meta["title"] = title
+        if authors is not None:
+            meta["authors"] = authors
+        if year is not None:
+            meta["year"] = year
+        if filename is not None:
+            meta["filename"] = filename
+
+        # Save checkpoint
+        checkpoint["paper_metadata"] = paper_metadata
+        self._save_checkpoint(checkpoint)
+
+        # Update all chunks in Qdrant
+        try:
+            update_fields = {}
+            if title is not None:
+                update_fields["title"] = title
+            if authors is not None:
+                update_fields["authors"] = authors
+            if year is not None:
+                update_fields["year"] = year
+            if filename is not None:
+                update_fields["file_name"] = filename
+
+            if update_fields:
+                self.store.update_paper_chunks_metadata(paper_id, update_fields)
+                logger.info(f"Updated metadata for paper {paper_id}: {update_fields}")
+
+        except Exception as e:
+            logger.error(f"Failed to update chunks in Qdrant: {e}")
+            # Continue anyway - checkpoint is updated
+
+        # Return updated paper
+        indexed_set = set(checkpoint.get("indexed_papers", []))
+        failed_papers = checkpoint.get("failed_papers", {})
+        chunk_stats = meta.get("chunk_stats", {})
+        chunk_count = meta.get("chunk_count", sum(chunk_stats.values()))
+
+        if paper_id in failed_papers:
+            status = "error"
+            error_msg = failed_papers[paper_id]
+        elif chunk_count > 0 or paper_id in indexed_set:
+            status = "indexed"
+            error_msg = None
+        else:
+            status = "pending"
+            error_msg = None
+
+        return PaperInfo(
+            paper_id=paper_id,
+            title=meta.get("title", "Unknown"),
+            authors=meta.get("authors", []),
+            year=meta.get("year"),
+            doi=meta.get("doi"),
+            filename=meta.get("filename", ""),
+            page_count=meta.get("page_count", 0),
+            chunk_count=chunk_count,
+            chunk_stats=chunk_stats,
+            indexed_at=meta.get("indexed_at"),
+            status=status,
+            error_message=error_msg,
+        )
 
     def delete_paper(self, paper_id: str) -> Dict[str, Any]:
         """Delete a paper and all its associated data.
@@ -698,6 +897,7 @@ class PaperLibraryService:
                 "title": chunks[0].title if chunks else "Unknown",
                 "authors": chunks[0].authors if chunks else [],
                 "year": chunks[0].year if chunks else None,
+                "doi": chunks[0].doi if chunks else None,
                 "filename": chunks[0].file_name if chunks else pdf_path.name,
                 "chunk_count": len(chunks),
                 "chunk_stats": chunk_stats,

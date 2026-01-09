@@ -35,6 +35,8 @@ class Dependencies:
         self._reranker: Optional["CohereReranker"] = None
         self._store: Optional["QdrantStore"] = None
         self._query_engine: Optional["QueryEngine"] = None
+        self._paper_library_service: Optional["PaperLibraryService"] = None
+        self._pdf_service: Optional["PDFService"] = None
 
     @property
     def qdrant_client(self) -> QdrantClient:
@@ -120,9 +122,35 @@ class Dependencies:
                 enable_entity_extraction=True,
                 enable_citation_verification=True,  # Verify LLM citations
                 enable_conversation_memory=True,
+                pdf_service=self.pdf_service,  # Pass PDF service for full document support
             )
             logger.info("Created QueryEngine")
         return self._query_engine
+
+    @property
+    def paper_library_service(self) -> "PaperLibraryService":
+        """Get or create the shared PaperLibraryService."""
+        if self._paper_library_service is None:
+            from services.paper_library import PaperLibraryService
+            self._paper_library_service = PaperLibraryService(
+                qdrant_store=self.store,
+                upload_dir=settings.upload_dir,
+                embedder=self.embedder,
+                bm25_vectorizer=self.bm25_vectorizer,
+            )
+            logger.info("Created PaperLibraryService")
+        return self._paper_library_service
+
+    @property
+    def pdf_service(self) -> "PDFService":
+        """Get or create the shared PDFService."""
+        if self._pdf_service is None:
+            from services.pdf_service import PDFService
+            self._pdf_service = PDFService(
+                paper_library_service=self.paper_library_service,
+            )
+            logger.info("Created PDFService")
+        return self._pdf_service
 
     def close(self) -> None:
         """Clean up resources."""
@@ -138,6 +166,7 @@ class Dependencies:
         self._reranker = None
         self._store = None
         self._query_engine = None
+        self._paper_library_service = None
 
     def reset(self) -> None:
         """Reset all dependencies (useful for testing)."""
@@ -193,12 +222,5 @@ def get_bm25_vectorizer() -> "BM25Vectorizer":
 
 
 def get_paper_library_service() -> "PaperLibraryService":
-    """FastAPI dependency for PaperLibraryService."""
-    from services.paper_library import PaperLibraryService
-    deps = get_dependencies()
-    return PaperLibraryService(
-        qdrant_store=deps.store,
-        upload_dir=settings.upload_dir,
-        embedder=deps.embedder,
-        bm25_vectorizer=deps.bm25_vectorizer,
-    )
+    """FastAPI dependency for PaperLibraryService (singleton)."""
+    return get_dependencies().paper_library_service

@@ -147,22 +147,46 @@ class SectionDetector:
         Handles common formats:
         - "Abstract" followed by text
         - "Abstract:" followed by text
-        - Text before "Introduction" if paper starts with abstract
+        - Text before "Introduction" or numbered sections
+        - Various section delimiters and formatting
         """
-        # Try to find explicit abstract section
-        abstract_pattern = re.compile(
-            r'abstract[:\s]*\n*(.*?)(?=\n\s*(?:introduction|keywords?|1\.|1\s|background)|\Z)',
-            re.IGNORECASE | re.DOTALL
-        )
-        match = abstract_pattern.search(text[:8000])  # Abstract should be near start
+        # Try multiple patterns in order of specificity
 
-        if match:
-            abstract = match.group(1).strip()
-            # Clean up: remove excessive whitespace
-            abstract = re.sub(r'\s+', ' ', abstract)
-            # Remove common artifacts
-            abstract = re.sub(r'^[:\s]+', '', abstract)
-            return abstract if len(abstract) > 50 else None
+        # Pattern 1: Abstract followed by common section headers
+        # More flexible - handles numbered sections, various headers
+        patterns = [
+            # Most common: Abstract followed by Introduction, numbered section, or keywords
+            re.compile(
+                r'abstract[:\s\-—]*\s*(.*?)(?=\n\s*(?:\d+\.?\s+)?(?:introduction|keywords?|background|methods?|materials?\s+and\s+methods?|results?)[\s\n]|\n\s*\d+[\.\)]\s+[A-Z]|\Z)',
+                re.IGNORECASE | re.DOTALL
+            ),
+            # Fallback: Just grab text after "Abstract" until double newline or section marker
+            re.compile(
+                r'abstract[:\s\-—]*\s*(.*?)(?=\n\n|\n\s*[A-Z][a-z]+:|\Z)',
+                re.IGNORECASE | re.DOTALL
+            ),
+        ]
+
+        # Search in first 10000 chars (increased from 8000)
+        search_text = text[:10000]
+
+        for pattern in patterns:
+            match = pattern.search(search_text)
+            if match:
+                abstract = match.group(1).strip()
+
+                # Clean up: remove excessive whitespace
+                abstract = re.sub(r'\s+', ' ', abstract)
+
+                # Remove common artifacts
+                abstract = re.sub(r'^[:\s\-—]+', '', abstract)
+
+                # Remove trailing artifacts like "Keywords:", "Key words:", etc.
+                abstract = re.sub(r'\s*(?:key\s*words?|keywords?)[\s:]*.*$', '', abstract, flags=re.IGNORECASE)
+
+                # Valid abstract should be at least 50 chars and not too long (max 3000 chars)
+                if 50 <= len(abstract) <= 3000:
+                    return abstract
 
         return None
 

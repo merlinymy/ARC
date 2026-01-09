@@ -50,6 +50,7 @@ class Chunk:
     title: str = ""
     authors: List[str] = field(default_factory=list)
     year: Optional[int] = None
+    doi: Optional[str] = None
 
     # New fields
     project_tag: Optional[str] = None
@@ -74,6 +75,7 @@ class Chunk:
             "title": self.title,
             "authors": self.authors,
             "year": self.year,
+            "doi": self.doi,
             "project_tag": self.project_tag,
             "research_area": self.research_area,
             "file_name": self.file_name,

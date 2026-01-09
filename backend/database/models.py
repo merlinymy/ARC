@@ -157,6 +157,7 @@ class UserPreferences(Base):
     enable_citation_check: Mapped[bool] = mapped_column(default=True)
     enable_general_knowledge: Mapped[bool] = mapped_column(default=True)
     enable_web_search: Mapped[bool] = mapped_column(default=False)
+    enable_pdf_upload: Mapped[bool] = mapped_column(default=False)
     # Custom system prompts (JSON structure for user-customized prompts)
     # Format: {"concise": {"factual": "...", ...}, "detailed": {...}, "addendums": {"general_knowledge": "...", "web_search": "..."}}
     custom_system_prompts: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

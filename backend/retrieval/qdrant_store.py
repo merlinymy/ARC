@@ -620,3 +620,33 @@ class QdrantStore:
 
         logger.info(f"Deleted {count} chunks for paper {paper_id}")
         return count
+
+    def update_paper_chunks_metadata(self, paper_id: str, update_fields: Dict[str, Any]) -> int:
+        """Update metadata fields for all chunks of a paper.
+
+        Args:
+            paper_id: The paper ID
+            update_fields: Dict of field names to new values (e.g., {"title": "New Title", "authors": ["Author 1"]})
+
+        Returns:
+            Number of points updated
+        """
+        from qdrant_client.models import SetPayload
+
+        # Get all chunk IDs for this paper
+        chunks = self.get_chunks_by_paper(paper_id)
+        if not chunks:
+            return 0
+
+        # Convert chunk_ids to Qdrant point IDs (UUIDs)
+        point_ids = [self._chunk_id_to_point_id(chunk["chunk_id"]) for chunk in chunks]
+
+        # Update payload for all chunks
+        self.client.set_payload(
+            collection_name=self.collection_name,
+            payload=update_fields,
+            points=point_ids,
+        )
+
+        logger.info(f"Updated {len(point_ids)} chunks for paper {paper_id} with fields: {list(update_fields.keys())}")
+        return len(point_ids)

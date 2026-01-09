@@ -343,6 +343,29 @@ In this section, clearly indicate that this information comes from your general 
 
 This separation helps users distinguish between information from their specific papers vs. general knowledge."""
 
+# PDF upload addendum for when full PDF documents are sent to Claude
+PDF_UPLOAD_ADDENDUM = """
+
+---
+IMPORTANT: Full PDF Document Mode is ENABLED.
+
+You have access to BOTH:
+1. **Full PDF documents** of the selected papers (sent as complete documents)
+2. **Retrieved source chunks** from RAG (pre-identified relevant sections)
+
+How to use these resources together:
+
+**CRITICAL: You MUST cite the retrieved sources using [Source N] format throughout your response.**
+
+- The retrieved source chunks (RAG) are pre-identified relevant sections that directly address the query
+- The full PDFs provide broader context, additional details, and sections not captured in the RAG chunks
+- **Always start by thoroughly addressing the question using the retrieved source chunks with [Source N] citations**
+- You may then draw on the full PDFs to provide additional context, figures, methods details, or related information not in the RAG chunks
+- When referencing information from the PDFs that is NOT in the retrieved sources, clearly indicate this (e.g., "From the broader paper context..." or "As shown in the full document...")
+- Cross-reference between RAG chunks and full PDFs to provide comprehensive, well-cited answers
+
+This dual approach allows you to provide highly relevant cited information (from RAG) while having access to the complete paper context (from PDFs)."""
+
 # Web search system prompt - used for the separate web search call
 WEB_SEARCH_SYSTEM_PROMPT = """You are a helpful research assistant. Search the web for publicly available information related to the user's question. Focus on recent publications, news, educational resources, and general background information.
 
@@ -391,7 +414,7 @@ def get_effective_addendum(
     """Get the effective addendum prompt, preferring custom over default.
 
     Args:
-        addendum_type: 'general_knowledge' or 'web_search'
+        addendum_type: 'general_knowledge', 'web_search', or 'pdf_upload'
         custom_prompts: Optional dict of custom prompts from user preferences
 
     Returns:
@@ -401,6 +424,7 @@ def get_effective_addendum(
     defaults = {
         "general_knowledge": GENERAL_KNOWLEDGE_ADDENDUM,
         "web_search": WEB_SEARCH_SYSTEM_PROMPT,
+        "pdf_upload": PDF_UPLOAD_ADDENDUM,
     }
 
     default = defaults.get(addendum_type, "")
@@ -436,6 +460,7 @@ class QueryEngine:
         enable_citation_verification: bool = False,
         enable_conversation_memory: bool = True,
         enable_hybrid_search: bool = False,
+        pdf_service: Optional["PDFService"] = None,
     ):
         """Initialize query engine.
 
@@ -463,6 +488,7 @@ class QueryEngine:
         self.enable_classification = enable_classification
         self.enable_expansion = enable_expansion
         self.enable_hybrid_search = enable_hybrid_search
+        self.pdf_service = pdf_service  # Optional PDF service for sending full PDFs to Claude
 
         # Initialize core components
         self.classifier = QueryClassifier(
@@ -518,6 +544,7 @@ class QueryEngine:
         response_mode: str = "detailed",
         enable_general_knowledge: bool = True,
         enable_web_search: bool = False,
+        enable_pdf_upload: bool = False,
         custom_prompts: Optional[Dict[str, Any]] = None,
     ) -> QueryResult:
         """Execute the full query pipeline.
@@ -895,6 +922,8 @@ class QueryEngine:
             progress_emitter=emit if progress_callback else None,
             temperature=effective_temperature,
             custom_prompts=custom_prompts,
+            paper_ids=paper_ids,
+            enable_pdf_upload=enable_pdf_upload,
         )
         timing_generation_ms = (time.perf_counter() - timing_generation_start) * 1000
         emit("generation", {"status": "complete"})
@@ -1182,6 +1211,8 @@ class QueryEngine:
         progress_emitter: Optional[callable] = None,
         temperature: float = 0.3,
         custom_prompts: Optional[Dict[str, Any]] = None,
+        paper_ids: Optional[List[str]] = None,
+        enable_pdf_upload: bool = False,
     ) -> str:
         """Generate answer using Claude with query-type-specific prompt.
 
@@ -1240,6 +1271,12 @@ class QueryEngine:
             system_prompt += general_knowledge_addendum
             logger.info("Added general knowledge addendum to system prompt")
 
+        # Add PDF upload addendum if enabled (using custom addendum if available)
+        if enable_pdf_upload:
+            pdf_upload_addendum = get_effective_addendum("pdf_upload", custom_prompts)
+            system_prompt += pdf_upload_addendum
+            logger.info("Added PDF upload addendum to system prompt")
+
         # Build messages array with conversation history
         messages = []
 
@@ -1249,19 +1286,30 @@ class QueryEngine:
             messages.extend(history)
 
         # Add current query with retrieved sources
-        if sources:
-            current_message = f"""Question: {query}
+        # If PDF upload is enabled and we have the service, use it to create a message with PDFs
+        if enable_pdf_upload and self.pdf_service and paper_ids:
+            logger.info(f"Creating user message with PDF documents for {len(paper_ids)} papers")
+            user_message = self.pdf_service.create_user_message_with_pdfs(
+                query=query,
+                paper_ids=paper_ids,
+                sources_text=sources_text if sources else None
+            )
+            messages.append(user_message)
+        else:
+            # Original text-only message
+            if sources:
+                current_message = f"""Question: {query}
 
 Retrieved Sources from Uploaded Papers:
 {sources_text}
 
 IMPORTANT: You MUST cite these sources using [Source N] format in your response. Start by answering the question using these sources with proper citations."""
-        else:
-            current_message = f"""Question: {query}
+            else:
+                current_message = f"""Question: {query}
 
 No sources were retrieved from the uploaded papers. Please answer based on your general scientific knowledge, clearly indicating that this response comes from general knowledge rather than the uploaded papers."""
 
-        messages.append({"role": "user", "content": current_message})
+            messages.append({"role": "user", "content": current_message})
 
         # Debug logging
         logger.info(f"System prompt length: {len(system_prompt)} chars")

@@ -7,7 +7,7 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import List, Optional, Callable
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, UploadFile, File, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field, field_validator
@@ -29,7 +29,7 @@ from dependencies import (
     get_paper_library_service,
 )
 from qdrant_client import QdrantClient
-from retrieval.query_engine import QueryEngine, SYSTEM_PROMPTS_CONCISE, SYSTEM_PROMPTS_DETAILED, GENERAL_KNOWLEDGE_ADDENDUM, WEB_SEARCH_SYSTEM_PROMPT
+from retrieval.query_engine import QueryEngine, SYSTEM_PROMPTS_CONCISE, SYSTEM_PROMPTS_DETAILED, GENERAL_KNOWLEDGE_ADDENDUM, WEB_SEARCH_SYSTEM_PROMPT, PDF_UPLOAD_ADDENDUM
 from retrieval.query_classifier import QueryType
 from retrieval.qdrant_store import QdrantStore
 from services.paper_library import PaperLibraryService
@@ -242,10 +242,21 @@ async def request_middleware(request: Request, call_next: Callable) -> Response:
             pass  # Don't fail request if user extraction fails
 
         # Rate limiting (use client IP or API key as identifier)
+        # Only apply rate limiting to endpoints that call external APIs (e.g., CrossRef)
+        # Internal operations (PDF reading, database queries) should not be rate-limited
         client_id = request.headers.get("X-API-Key") or request.client.host if request.client else "unknown"
         client_ip = request.client.host if request.client else None
 
-        if not await rate_limiter.is_allowed(client_id):
+        # Paths that should be rate-limited (external API calls)
+        rate_limited_paths = [
+            "/metadata/doi/",  # Calls CrossRef API
+            "/query/stream",   # May call web search APIs
+        ]
+
+        # Check if this path should be rate-limited
+        should_rate_limit = any(request.url.path.startswith(path) for path in rate_limited_paths)
+
+        if should_rate_limit and not await rate_limiter.is_allowed(client_id):
             await shutdown_handler.end_request()
             return Response(
                 content='{"detail": "Rate limit exceeded. Try again later."}',
@@ -289,7 +300,10 @@ async def request_middleware(request: Request, call_next: Callable) -> Response:
             # Add tracing headers to response
             response.headers["X-Request-ID"] = request_id
             response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
-            response.headers["X-RateLimit-Remaining"] = str(rate_limiter.get_remaining(client_id))
+
+            # Only add rate limit header for rate-limited endpoints
+            if should_rate_limit:
+                response.headers["X-RateLimit-Remaining"] = str(rate_limiter.get_remaining(client_id))
 
             return response
 
@@ -368,6 +382,10 @@ class QueryRequest(BaseModel):
     enable_web_search: bool = Field(
         default=False,
         description="Enable Claude web search. When enabled, Claude can search the web for additional context. Web-sourced content will be clearly marked."
+    )
+    enable_pdf_upload: bool = Field(
+        default=False,
+        description="Send actual PDF files to Claude along with RAG chunks. Limited to 32MB total size and 100 pages."
     )
 
     @field_validator('response_mode')
@@ -588,6 +606,7 @@ async def query_papers(
             response_mode=request.response_mode,
             enable_general_knowledge=request.enable_general_knowledge,
             enable_web_search=request.enable_web_search,
+            enable_pdf_upload=request.enable_pdf_upload,
             custom_prompts=custom_prompts,
         )
 
@@ -743,6 +762,7 @@ async def query_papers_stream(
                     response_mode=request.response_mode,
                     enable_general_knowledge=request.enable_general_knowledge,
                     enable_web_search=request.enable_web_search,
+                    enable_pdf_upload=request.enable_pdf_upload,
                     custom_prompts=custom_prompts,
                 )
                 result_holder[0] = result
@@ -948,6 +968,7 @@ class PaperResponse(BaseModel):
     title: str
     authors: List[str]
     year: Optional[int] = None
+    doi: Optional[str] = None
     filename: str
     page_count: int
     chunk_count: int
@@ -956,6 +977,7 @@ class PaperResponse(BaseModel):
     status: str
     error_message: Optional[str] = None
     pdf_url: str
+    file_size_bytes: int = 0
 
 
 class PaperListResponse(BaseModel):
@@ -995,6 +1017,7 @@ class PaperSearchResult(BaseModel):
     chunk_count: int
     status: str
     pdf_url: str
+    file_size_bytes: int = 0
     # Preview of best matching chunk
     preview_text: Optional[str] = None
     preview_section: Optional[str] = None
@@ -1110,6 +1133,7 @@ async def search_papers(
                 chunk_count=r['chunk_count'],
                 status=r['status'],
                 pdf_url=f"/papers/{r['paper_id']}/pdf",
+                file_size_bytes=r.get('file_size_bytes', 0),
                 preview_text=r.get('preview_text'),
                 preview_section=r.get('preview_section'),
                 preview_subsection=r.get('preview_subsection'),
@@ -1135,17 +1159,32 @@ async def search_papers(
 async def list_papers(
     offset: int = Query(0, ge=0, description="Number of papers to skip"),
     limit: int = Query(50, ge=1, le=100, description="Maximum papers to return"),
+    search: Optional[str] = Query(None, description="Filter by title, filename, or author (case-insensitive substring match)"),
+    sort_by: str = Query("indexed_at", description="Field to sort by: title, year, chunk_count, indexed_at"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
     library: PaperLibraryService = Depends(get_paper_library_service),
 ):
-    """List papers in the library with pagination."""
+    """List papers in the library with pagination, filtering, and sorting.
+
+    Papers are sorted by upload time (indexed_at) descending (newest first) by default.
+    Use 'search' to filter by title, filename, or author.
+    Use 'sort_by' and 'sort_order' to control sorting.
+    """
     try:
-        result = library.list_papers(offset=offset, limit=limit)
+        result = library.list_papers(
+            offset=offset,
+            limit=limit,
+            search=search,
+            sort_by=sort_by,
+            sort_order=sort_order
+        )
         paper_responses = [
             PaperResponse(
                 paper_id=p.paper_id,
                 title=p.title,
                 authors=p.authors,
                 year=p.year,
+                doi=p.doi,
                 filename=p.filename,
                 page_count=p.page_count,
                 chunk_count=p.chunk_count,
@@ -1154,6 +1193,7 @@ async def list_papers(
                 status=p.status,
                 error_message=p.error_message,
                 pdf_url=f"/papers/{p.paper_id}/pdf",
+                file_size_bytes=p.file_size_bytes,
             )
             for p in result.papers
         ]
@@ -1185,6 +1225,7 @@ async def get_paper(
             title=paper.title,
             authors=paper.authors,
             year=paper.year,
+            doi=paper.doi,
             filename=paper.filename,
             page_count=paper.page_count,
             chunk_count=paper.chunk_count,
@@ -1193,12 +1234,157 @@ async def get_paper(
             status=paper.status,
             error_message=paper.error_message,
             pdf_url=f"/papers/{paper.paper_id}/pdf",
+            file_size_bytes=paper.file_size_bytes,
         )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to get paper {paper_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error getting paper: {str(e)}")
+
+
+@app.get("/metadata/doi/{doi:path}")
+async def fetch_metadata_from_doi(doi: str):
+    """Fetch paper metadata from CrossRef using DOI.
+
+    Returns: title, authors, year, journal
+    """
+    try:
+        import requests
+        from urllib.parse import unquote
+
+        # Decode URL-encoded DOI
+        doi = unquote(doi)
+
+        # CrossRef REST API
+        url = f"https://api.crossref.org/works/{doi}"
+        headers = {
+            'User-Agent': 'ResearchPaperRAG/1.0 (mailto:user@example.com)'
+        }
+
+        response = requests.get(url, headers=headers, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()['message']
+
+            # Extract metadata
+            title = data.get('title', [None])[0] if data.get('title') else None
+
+            authors = []
+            for author in data.get('author', []):
+                given = author.get('given', '')
+                family = author.get('family', '')
+                if given and family:
+                    authors.append(f"{given} {family}")
+                elif family:
+                    authors.append(family)
+
+            year = None
+            if 'published-print' in data:
+                year = data['published-print'].get('date-parts', [[None]])[0][0]
+            elif 'published-online' in data:
+                year = data['published-online'].get('date-parts', [[None]])[0][0]
+
+            journal = data.get('container-title', [None])[0] if data.get('container-title') else None
+
+            return {
+                'title': title,
+                'authors': authors,
+                'year': year,
+                'journal': journal,
+                'doi': doi
+            }
+        else:
+            raise HTTPException(status_code=404, detail=f"DOI not found or CrossRef API error: {response.status_code}")
+
+    except requests.RequestException as e:
+        logger.error(f"Failed to fetch DOI metadata: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch metadata: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error processing DOI: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/papers/{paper_id}/extract-doi")
+async def extract_doi_from_paper(
+    paper_id: str,
+    library: PaperLibraryService = Depends(get_paper_library_service),
+):
+    """Extract DOI from an existing paper's PDF.
+
+    Returns the extracted DOI or null if not found.
+    """
+    try:
+        # Get the PDF path
+        pdf_path = library.get_pdf_path(paper_id)
+        if not pdf_path or not pdf_path.exists():
+            raise HTTPException(status_code=404, detail=f"PDF not found for paper: {paper_id}")
+
+        # Import the processor
+        from preprocessing.pdf_processor import EnhancedPDFProcessor
+
+        # Create processor instance
+        processor = EnhancedPDFProcessor()
+
+        # Extract DOI
+        doi = processor._extract_doi_from_pdf(pdf_path)
+
+        return {"doi": doi, "paper_id": paper_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to extract DOI from paper {paper_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error extracting DOI: {str(e)}")
+
+
+@app.patch("/papers/{paper_id}")
+async def update_paper_metadata(
+    paper_id: str,
+    title: Optional[str] = Body(None),
+    authors: Optional[List[str]] = Body(None),
+    year: Optional[int] = Body(None),
+    filename: Optional[str] = Body(None),
+    library: PaperLibraryService = Depends(get_paper_library_service),
+):
+    """Update paper metadata.
+
+    Allows manual editing of title, authors, year, and filename.
+    Changes are persisted in the checkpoint and propagated to all chunks.
+    """
+    try:
+        updated_paper = library.update_paper_metadata(
+            paper_id=paper_id,
+            title=title,
+            authors=authors,
+            year=year,
+            filename=filename
+        )
+
+        if not updated_paper:
+            raise HTTPException(status_code=404, detail=f"Paper not found: {paper_id}")
+
+        return PaperResponse(
+            paper_id=updated_paper.paper_id,
+            title=updated_paper.title,
+            authors=updated_paper.authors,
+            year=updated_paper.year,
+            doi=updated_paper.doi,
+            filename=updated_paper.filename,
+            page_count=updated_paper.page_count,
+            chunk_count=updated_paper.chunk_count,
+            chunk_stats=updated_paper.chunk_stats,
+            indexed_at=updated_paper.indexed_at,
+            status=updated_paper.status,
+            error_message=updated_paper.error_message,
+            pdf_url=f"/papers/{updated_paper.paper_id}/pdf",
+            file_size_bytes=updated_paper.file_size_bytes,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update paper metadata {paper_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error updating paper: {str(e)}")
 
 
 @app.get("/papers/{paper_id}/pdf")
@@ -1938,6 +2124,7 @@ def get_default_prompts() -> dict:
         "addendums": {
             "general_knowledge": GENERAL_KNOWLEDGE_ADDENDUM,
             "web_search": WEB_SEARCH_SYSTEM_PROMPT,
+            "pdf_upload": PDF_UPLOAD_ADDENDUM,
         }
     }
 

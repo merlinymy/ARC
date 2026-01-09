@@ -15,7 +15,7 @@ Uses MinerU (PDF-Extract-Kit) for:
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import logging
 import tempfile
 import json
@@ -23,9 +23,19 @@ import re
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import tiktoken
+import multiprocessing
+import gc
 
 from .models import ChunkType, PaperMetadata, Chunk
 from .chunker import PaperChunker
+
+# Set multiprocessing start method to 'spawn' for macOS safety
+# This prevents fork() issues with MinerU's multiprocessing
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    # Already set, ignore
+    pass
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -79,8 +89,8 @@ class MinerUExtractor:
             return
 
         try:
-            from mineru.cli.common import prepare_env
-            prepare_env()
+            # MinerU doesn't require prepare_env() when using the library programmatically
+            # The actual pipeline functions (doc_analyze, etc.) handle initialization internally
             self._initialized = True
             logger.info("MinerU initialized successfully")
         except Exception as e:
@@ -103,9 +113,15 @@ class MinerUExtractor:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(self._extract_with_mineru, pdf_path)
                 try:
-                    return future.result(timeout=self.timeout)
+                    result = future.result(timeout=self.timeout)
+                    return result
                 except FuturesTimeoutError:
                     logger.warning(f"MinerU extraction timed out after {self.timeout}s for {pdf_path.name}, using fallback")
+                    future.cancel()  # Try to cancel the running task
+                    return self._fallback_extract(pdf_path)
+                except Exception as e:
+                    logger.warning(f"MinerU extraction error: {e}, using fallback")
+                    future.cancel()
                     return self._fallback_extract(pdf_path)
         except Exception as e:
             logger.warning(f"MinerU extraction failed, falling back: {e}")
@@ -120,55 +136,66 @@ class MinerUExtractor:
         from mineru.data.data_reader_writer import FileBasedDataWriter
         from mineru.utils.enum_class import MakeMode
 
-        # Read PDF bytes
-        pdf_bytes = read_fn(pdf_path)
+        try:
+            # Read PDF bytes
+            pdf_bytes = read_fn(pdf_path)
 
-        # Create temp directory for images
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            image_writer = FileBasedDataWriter(tmp_dir)
+            # Create temp directory for images
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                image_writer = FileBasedDataWriter(tmp_dir)
 
-            # Run document analysis
-            infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled = doc_analyze(
-                [pdf_bytes],
-                [self.lang],
-                parse_method="auto",
-                formula_enable=True,
-                table_enable=True
-            )
+                # Run document analysis
+                infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled = doc_analyze(
+                    [pdf_bytes],
+                    [self.lang],
+                    parse_method="auto",
+                    formula_enable=True,
+                    table_enable=True
+                )
 
-            # Convert to intermediate format
-            middle_json = result_to_middle_json(
-                infer_results[0],
-                all_image_lists[0],
-                all_pdf_docs[0],
-                image_writer,
-                self.lang,
-                ocr_enabled[0]
-            )
+                # Convert to intermediate format
+                middle_json = result_to_middle_json(
+                    infer_results[0],
+                    all_image_lists[0],
+                    all_pdf_docs[0],
+                    image_writer,
+                    self.lang,
+                    ocr_enabled[0]
+                )
 
-            pdf_info = middle_json.get("pdf_info", [])
+                pdf_info = middle_json.get("pdf_info", [])
 
-            # Generate markdown and content list
-            markdown = union_make(pdf_info, MakeMode.MM_MD, tmp_dir)
-            content_list = union_make(pdf_info, MakeMode.CONTENT_LIST, tmp_dir)
+                # Generate markdown and content list
+                markdown = union_make(pdf_info, MakeMode.MM_MD, tmp_dir)
+                content_list = union_make(pdf_info, MakeMode.CONTENT_LIST, tmp_dir)
 
-            # Extract components
-            full_text = self._extract_text_from_content(content_list)
-            tables = self._extract_tables_from_content(content_list)
-            figures = self._extract_figures_from_content(content_list)
-            captions = self._extract_captions_from_markdown(markdown)
+                # Extract components
+                full_text = self._extract_text_from_content(content_list)
+                tables = self._extract_tables_from_content(content_list)
+                figures = self._extract_figures_from_content(content_list)
+                captions = self._extract_captions_from_markdown(markdown)
 
-            # Extract metadata
-            metadata = self._extract_metadata(pdf_path, middle_json)
+                # Extract metadata
+                metadata = self._extract_metadata(pdf_path, middle_json)
 
-            return MinerUContent(
-                full_text=full_text,
-                markdown=markdown,
-                tables=tables,
-                figures=figures,
-                captions=captions,
-                metadata=metadata
-            )
+                result = MinerUContent(
+                    full_text=full_text,
+                    markdown=markdown,
+                    tables=tables,
+                    figures=figures,
+                    captions=captions,
+                    metadata=metadata
+                )
+
+                # Clean up references to help with resource cleanup
+                del infer_results, all_image_lists, all_pdf_docs, middle_json
+                gc.collect()
+
+                return result
+        except Exception as e:
+            # Ensure cleanup on error
+            gc.collect()
+            raise
 
     def _sanitize_text(self, text: str) -> str:
         """Remove invalid Unicode characters that can't be encoded to JSON.
@@ -267,9 +294,10 @@ class MinerUExtractor:
 
     def _fallback_extract(self, pdf_path: Path) -> MinerUContent:
         """Fallback extraction using basic pypdfium2."""
-        try:
-            import pypdfium2 as pdfium
+        import pypdfium2 as pdfium
 
+        doc = None
+        try:
             doc = pdfium.PdfDocument(pdf_path)
             text_parts = []
 
@@ -277,6 +305,7 @@ class MinerUExtractor:
                 page = doc[page_num]
                 textpage = page.get_textpage()
                 text_parts.append(textpage.get_text_bounded())
+                textpage.close()  # Close textpage to free resources
 
             full_text = "\n\n".join(text_parts)
 
@@ -302,6 +331,13 @@ class MinerUExtractor:
                 captions=[],
                 metadata={"title": pdf_path.stem, "file_name": pdf_path.name, "num_pages": 0}
             )
+        finally:
+            # Always close the PDF document to prevent file descriptor leaks
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
 
 
 class PDFProcessor:
@@ -603,8 +639,10 @@ class EnhancedPDFProcessor:
 
     def _extract_authors_from_pdf_metadata(self, pdf_path: Path) -> List[str]:
         """Extract authors from PDF document metadata."""
+        import pypdfium2 as pdfium
+
+        doc = None
         try:
-            import pypdfium2 as pdfium
             doc = pdfium.PdfDocument(pdf_path)
             metadata = doc.get_metadata_dict()
 
@@ -626,11 +664,20 @@ class EnhancedPDFProcessor:
         except Exception as e:
             logger.debug(f"Could not extract PDF metadata: {e}")
             return []
+        finally:
+            # Always close the PDF document to prevent file descriptor leaks
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
 
     def _extract_title_from_pdf_metadata(self, pdf_path: Path) -> Optional[str]:
         """Extract title from PDF document metadata."""
+        import pypdfium2 as pdfium
+
+        doc = None
         try:
-            import pypdfium2 as pdfium
             doc = pdfium.PdfDocument(pdf_path)
             metadata = doc.get_metadata_dict()
 
@@ -641,6 +688,154 @@ class EnhancedPDFProcessor:
         except Exception as e:
             logger.debug(f"Could not extract PDF title metadata: {e}")
             return None
+        finally:
+            # Always close the PDF document to prevent file descriptor leaks
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+
+    def _extract_doi_from_pdf(self, pdf_path: Path) -> Optional[str]:
+        """Extract DOI from PDF metadata or first 3 pages text.
+
+        DOI can be in:
+        1. PDF metadata (uncommon)
+        2. First 3 pages text (common)
+        """
+        import pypdfium2 as pdfium
+
+        doc = None
+        try:
+            # Open PDF once and check both metadata and text
+            doc = pdfium.PdfDocument(pdf_path)
+
+            # Try PDF metadata first
+            try:
+                metadata = doc.get_metadata_dict()
+
+                # Check common DOI fields
+                for field in ['doi', 'DOI', 'Doi', 'Subject', 'Keywords']:
+                    value = metadata.get(field, '')
+                    if value and 'doi' in value.lower():
+                        # Extract DOI from text
+                        doi_match = re.search(r'10\.\d{4,}/[^\s]+', value)
+                        if doi_match:
+                            doi = doi_match.group(0).strip().rstrip('.,;)')
+                            logger.debug(f"Found DOI in metadata: {doi}")
+                            return doi
+            except Exception as e:
+                logger.debug(f"Could not extract DOI from metadata: {e}")
+
+            # Try extracting from first 3 pages text
+            try:
+                # Check first 3 pages (or fewer if document is shorter)
+                pages_to_check = min(3, len(doc))
+
+                for page_num in range(pages_to_check):
+                    page = doc[page_num]
+                    textpage = page.get_textpage()
+                    page_text = textpage.get_text_bounded()
+
+                    # Close the textpage to free resources
+                    textpage.close()
+
+                    # Look for DOI patterns (more comprehensive)
+                    doi_patterns = [
+                        r'doi\.org/([0-9]{2}\.[0-9]{4,}/[^\s\"\'\)]+)',  # doi.org/10.xxxx/...
+                        r'DOI:?\s*([0-9]{2}\.[0-9]{4,}/[^\s\"\'\)]+)',  # DOI: 10.xxxx/...
+                        r'doi:?\s*([0-9]{2}\.[0-9]{4,}/[^\s\"\'\)]+)',  # doi: 10.xxxx/...
+                        r'\bhttps?://dx\.doi\.org/([0-9]{2}\.[0-9]{4,}/[^\s\"\'\)]+)',  # dx.doi.org/...
+                        r'\b([0-9]{2}\.[0-9]{4,}/[A-Za-z0-9\.\-_\(\)/]+)',  # standalone 10.xxxx/...
+                    ]
+
+                    for pattern in doi_patterns:
+                        match = re.search(pattern, page_text, re.IGNORECASE)
+                        if match:
+                            doi = match.group(1) if len(match.groups()) > 0 else match.group(0)
+                            # Clean up DOI
+                            doi = doi.strip().rstrip('.,;:\)\"\' ')
+                            # Remove trailing punctuation and quotes
+                            doi = re.sub(r'[.,;:\)\"\'\s]+$', '', doi)
+
+                            if doi.startswith('10.') and '/' in doi:
+                                logger.debug(f"Found DOI on page {page_num + 1}: {doi}")
+                                return doi
+
+            except Exception as e:
+                logger.debug(f"Could not extract DOI from text: {e}")
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"Failed to open PDF for DOI extraction: {e}")
+            return None
+
+        finally:
+            # CRITICAL: Always close the PDF document to prevent file descriptor leaks
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass  # Ignore errors during cleanup
+
+    def _fetch_metadata_from_doi(self, doi: str) -> Dict[str, Any]:
+        """Fetch paper metadata from CrossRef using DOI.
+
+        Returns dict with: title, authors, year, journal
+        """
+        try:
+            import requests
+
+            # CrossRef REST API
+            url = f"https://api.crossref.org/works/{doi}"
+            headers = {
+                'User-Agent': 'ResearchPaperRAG/1.0 (mailto:user@example.com)'  # Polite API usage
+            }
+
+            response = requests.get(url, headers=headers, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()['message']
+
+                # Extract title
+                title = data.get('title', [None])[0] if data.get('title') else None
+
+                # Extract authors
+                authors = []
+                for author in data.get('author', []):
+                    given = author.get('given', '')
+                    family = author.get('family', '')
+                    if given and family:
+                        authors.append(f"{given} {family}")
+                    elif family:
+                        authors.append(family)
+
+                # Extract year
+                year = None
+                if 'published-print' in data:
+                    year = data['published-print'].get('date-parts', [[None]])[0][0]
+                elif 'published-online' in data:
+                    year = data['published-online'].get('date-parts', [[None]])[0][0]
+
+                # Extract journal
+                journal = data.get('container-title', [None])[0] if data.get('container-title') else None
+
+                logger.info(f"Fetched metadata from CrossRef for DOI: {doi}")
+                return {
+                    'title': title,
+                    'authors': authors,
+                    'year': year,
+                    'journal': journal,
+                    'doi': doi
+                }
+            else:
+                logger.warning(f"CrossRef API returned {response.status_code} for DOI: {doi}")
+                return {}
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch metadata from CrossRef: {e}")
+            return {}
 
     def _extract_year(self, pdf_path: Path) -> Optional[int]:
         """Extract publication year from filename."""
@@ -686,12 +881,42 @@ class EnhancedPDFProcessor:
         if not authors:
             authors = self._extract_authors_from_text(full_text)
 
+        # Extract year
+        year = self._extract_year(pdf_path)
+        journal = None
+        doi = None
+
+        # Try DOI extraction and CrossRef lookup (overrides poor extraction)
+        doi_extracted = self._extract_doi_from_pdf(pdf_path)
+        if doi_extracted:
+            logger.info(f"Found DOI: {doi_extracted}")
+            doi = doi_extracted
+            crossref_metadata = self._fetch_metadata_from_doi(doi_extracted)
+
+            if crossref_metadata:
+                # Override with CrossRef data if available and better quality
+                if crossref_metadata.get('title') and len(crossref_metadata['title']) > 10:
+                    title = crossref_metadata['title']
+                    logger.info(f"Using CrossRef title: {title}")
+
+                if crossref_metadata.get('authors') and len(crossref_metadata['authors']) > 0:
+                    authors = crossref_metadata['authors']
+                    logger.info(f"Using CrossRef authors: {authors}")
+
+                if crossref_metadata.get('year'):
+                    year = crossref_metadata['year']
+
+                if crossref_metadata.get('journal'):
+                    journal = crossref_metadata['journal']
+
         # Create paper metadata
         paper_metadata = PaperMetadata(
             paper_id=paper_id,
             title=title,
             authors=authors,
-            year=self._extract_year(pdf_path),
+            year=year,
+            journal=journal,
+            doi=doi,
             num_pages=meta.get('num_pages', 0),
             file_name=meta.get('file_name', pdf_path.name),
             project_tag=project_tag,

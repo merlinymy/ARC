@@ -77,8 +77,8 @@ class PDFService:
             return {
                 'pdf_path': pdf_path,
                 'size_mb': size_mb,
-                'page_count': paper.get('page_count', 0),
-                'title': paper.get('title', 'Unknown'),
+                'page_count': paper.page_count,
+                'title': paper.title,
             }
         except Exception as e:
             logger.error(f"Failed to get PDF info for paper {paper_id}: {e}")

@@ -11,7 +11,7 @@ Rate limits (with payment method):
 
 import logging
 import time
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 import numpy as np
 import voyageai
 
@@ -96,11 +96,16 @@ class VoyageEmbedder:
         # If we've exhausted retries, raise the last error
         raise Exception(f"Failed after {self.max_retries} retries due to rate limiting")
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+    def embed_documents(
+        self,
+        texts: List[str],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> List[List[float]]:
         """Embed a list of documents with rate limiting and retry.
 
         Args:
             texts: List of document texts
+            progress_callback: Optional callback(batch_index, total_batches) called after each batch
 
         Returns:
             List of embedding vectors
@@ -109,11 +114,20 @@ class VoyageEmbedder:
             return []
 
         all_embeddings = []
+        total_batches = (len(texts) + self.batch_size - 1) // self.batch_size
+        batch_index = 0
 
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i:i + self.batch_size]
             embeddings = self._embed_with_retry(batch, input_type="document")
             all_embeddings.extend(embeddings)
+            batch_index += 1
+
+            if progress_callback:
+                try:
+                    progress_callback(batch_index, total_batches)
+                except Exception as e:
+                    logger.warning(f"Progress callback error: {e}")
 
         return all_embeddings
 

@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     upload_dir: Path = Field(default=Path("/Volumes/ARC/ARC/papers"), description="Directory for uploaded PDF files")
 
     # Upload settings
-    max_upload_size_mb: int = Field(default=50, description="Maximum upload file size in MB")
+    max_upload_size_mb: int = Field(default=200, description="Maximum upload file size in MB")
 
     # Processing Settings
     chunk_size: int = 512

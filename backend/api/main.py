@@ -68,7 +68,12 @@ class RateLimiter:
                 ts for ts in self.requests[client_id] if ts > window_start
             ]
 
-            if len(self.requests[client_id]) >= self.requests_per_minute:
+            # Evict stale client IDs with no recent requests
+            if not self.requests[client_id]:
+                del self.requests[client_id]
+                # Re-add for this request below
+
+            if len(self.requests.get(client_id, [])) >= self.requests_per_minute:
                 return False
 
             self.requests[client_id].append(now)
@@ -128,6 +133,13 @@ class GracefulShutdown:
 
 shutdown_handler = GracefulShutdown()
 
+# Shared thread pool for streaming query execution (avoids creating/leaking
+# a new ThreadPoolExecutor per /query/stream request)
+import concurrent.futures
+_stream_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="query-stream"
+)
+
 # Global upload queue service (initialized in lifespan)
 upload_queue_service: Optional[UploadQueueService] = None
 
@@ -185,6 +197,10 @@ async def lifespan(app: FastAPI):
     if upload_queue_service:
         await upload_queue_service.stop()
         logger.info("Upload queue service stopped")
+
+    # Shut down shared stream executor
+    _stream_executor.shutdown(wait=True)
+    logger.info("Stream executor shut down")
 
     logger.info("Shutting down Research Paper RAG API...")
     get_dependencies().close()
@@ -744,8 +760,6 @@ async def query_papers_stream(
             progress_events.append({"step": step, "data": data})
 
         # Run query in a thread to not block
-        import concurrent.futures
-
         def run_query():
             try:
                 result = query_engine.query(
@@ -769,9 +783,8 @@ async def query_papers_stream(
             except Exception as e:
                 error_holder[0] = str(e)
 
-        # Start query execution in background thread
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(run_query)
+        # Use shared thread pool instead of creating a new executor per request
+        future = _stream_executor.submit(run_query)
 
         # Stream progress events as they come in
         last_sent = 0
@@ -787,12 +800,23 @@ async def query_papers_stream(
 
         # Check for errors
         if error_holder[0]:
+            logger.error(f"[STREAM] Query execution failed: {error_holder[0]}")
             yield f"data: {json.dumps({'type': 'error', 'message': error_holder[0]})}\n\n"
             return
 
         # Send final result
         result = result_holder[0]
         if result:
+            # Log what we received from the query engine
+            import hashlib
+            answer_hash = hashlib.md5(result.answer.encode()).hexdigest()
+            logger.info(f"[STREAM] Query execution completed, preparing final result")
+            logger.info(f"[STREAM] Result.answer length: {len(result.answer)} chars, MD5: {answer_hash}")
+            logger.info(f"[STREAM] Result.answer preview: {result.answer[:200]}...")
+            if result.web_search_answer:
+                ws_hash = hashlib.md5(result.web_search_answer.encode()).hexdigest()
+                logger.info(f"[STREAM] Result.web_search_answer length: {len(result.web_search_answer)} chars, MD5: {ws_hash}")
+
             sources = []
             for source in result.sources:
                 sources.append({
@@ -847,6 +871,7 @@ async def query_papers_stream(
             # Persist messages to database if conversation_id is provided
             if request.conversation_id and current_user:
                 try:
+                    logger.info(f"[DB_SAVE] Starting message persistence for conversation {request.conversation_id}")
                     chat_service = ChatService(session)
 
                     # Check if conversation exists, create if not
@@ -859,17 +884,25 @@ async def query_papers_stream(
                         await chat_service.create_conversation(
                             request.conversation_id, current_user.id, title=title
                         )
+                        logger.info(f"[DB_SAVE] Created new conversation {request.conversation_id}")
 
                     # Save user message
-                    await chat_service.add_message(
+                    logger.info(f"[DB_SAVE] Saving user message - Length: {len(request.question)} chars")
+                    user_msg = await chat_service.add_message(
                         conversation_id=request.conversation_id,
                         user_id=current_user.id,
                         role="user",
                         content=request.question,
                     )
+                    logger.info(f"[DB_SAVE] User message saved with ID: {user_msg.id}")
+
+                    # Log what we're about to save
+                    logger.info(f"[DB_SAVE] Preparing to save RAG answer - Length: {len(result.answer)} chars")
+                    logger.info(f"[DB_SAVE] RAG answer preview: {result.answer[:200]}...")
+                    logger.info(f"[DB_SAVE] RAG answer hash: {hash(result.answer)}")
 
                     # Save assistant message with metadata
-                    await chat_service.add_message(
+                    assistant_msg = await chat_service.add_message(
                         conversation_id=request.conversation_id,
                         user_id=current_user.id,
                         role="assistant",
@@ -882,10 +915,12 @@ async def query_papers_stream(
                             "citationChecks": citation_checks,
                         }
                     )
+                    logger.info(f"[DB_SAVE] RAG answer saved with ID: {assistant_msg.id}")
 
                     # Save web search as separate assistant message if available
                     if result.web_search_answer:
-                        await chat_service.add_message(
+                        logger.info(f"[DB_SAVE] Saving web search answer - Length: {len(result.web_search_answer)} chars")
+                        web_msg = await chat_service.add_message(
                             conversation_id=request.conversation_id,
                             user_id=current_user.id,
                             role="assistant",
@@ -895,11 +930,12 @@ async def query_papers_stream(
                                 "sources": result.web_search_sources,
                             }
                         )
+                        logger.info(f"[DB_SAVE] Web search answer saved with ID: {web_msg.id}")
+
+                    logger.info(f"[DB_SAVE] All messages persisted successfully for conversation {request.conversation_id}")
                 except Exception as e:
                     # Log but don't fail the stream if message persistence fails
-                    logger.warning(f"Failed to persist chat messages: {e}")
-
-        executor.shutdown(wait=False)
+                    logger.error(f"[DB_SAVE] Failed to persist chat messages: {e}", exc_info=True)
 
     return StreamingResponse(
         event_generator(),
@@ -1528,8 +1564,6 @@ async def upload_paper_stream(
             """Capture progress events."""
             progress_events.append({"step": step, "data": data})
 
-        import concurrent.futures
-
         def run_indexing():
             try:
                 # Save the uploaded file
@@ -1541,9 +1575,8 @@ async def upload_paper_stream(
             except Exception as e:
                 error_holder[0] = str(e)
 
-        # Start indexing in background thread
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(run_indexing)
+        # Use shared thread pool instead of creating a new executor per request
+        future = _stream_executor.submit(run_indexing)
 
         # Stream progress events
         last_sent = 0
@@ -1574,8 +1607,6 @@ async def upload_paper_stream(
             }
             yield f"data: {json.dumps(final_data)}\n\n"
 
-        executor.shutdown(wait=False)
-
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -1593,7 +1624,7 @@ async def upload_paper_stream(
 
 class BatchUploadInitRequest(BaseModel):
     """Request to initialize batch upload."""
-    filenames: List[str] = Field(..., min_length=1, max_length=20)
+    filenames: List[str] = Field(..., min_length=1)
 
 
 class UploadTaskResponse(BaseModel):
@@ -1646,9 +1677,6 @@ async def init_batch_upload(
     Creates upload tasks for each file in the batch. Files should be uploaded
     individually using the /papers/upload/batch/{batch_id}/file endpoint.
     """
-    if len(batch_request.filenames) > 20:
-        raise HTTPException(status_code=400, detail="Maximum 20 files per batch")
-
     # Validate all filenames are PDFs
     for filename in batch_request.filenames:
         if not filename.lower().endswith('.pdf'):
@@ -1673,6 +1701,64 @@ async def init_batch_upload(
             batch_id=batch_id,
             filename=filename,
             file_size=0,  # Will be updated when file is uploaded
+            user_id=current_user.id if current_user else None,
+            priority=priority,
+        )
+        tasks.append(UploadTaskResponse(
+            taskId=task.id,
+            batchId=task.batch_id,
+            filename=task.filename,
+            paperId=task.paper_id,
+            status=task.status,
+            currentStep=task.current_step,
+            progressPercent=task.progress_percent,
+            errorMessage=task.error_message,
+            priority=task.priority,
+            fileSize=task.file_size,
+            createdAt=task.created_at.isoformat() if task.created_at else None,
+        ))
+
+    return BatchUploadInitResponse(batchId=batch_id, tasks=tasks)
+
+
+class BatchAddTasksRequest(BaseModel):
+    """Request to add tasks to an existing batch."""
+    filenames: List[str] = Field(..., min_length=1)
+
+
+@app.post("/papers/upload/batch/{batch_id}/add-tasks", response_model=BatchUploadInitResponse)
+async def add_batch_tasks(
+    batch_id: str,
+    add_request: BatchAddTasksRequest,
+    request: Request,
+    queue: UploadQueueService = Depends(get_upload_queue),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Add new tasks to an existing batch.
+
+    Creates upload tasks for additional files in an already-running batch.
+    """
+    # Validate all filenames are PDFs
+    for filename in add_request.filenames:
+        if not filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail=f"Only PDF files are allowed: {filename}")
+
+    # Log user operation
+    request_id = request.headers.get("X-Request-ID", "")
+    user_id = str(current_user.id) if current_user else None
+    req_logger = RequestLogger(request_id, user_id)
+    req_logger.log_user_operation("add_batch_tasks", {
+        "batch_id": batch_id,
+        "file_count": len(add_request.filenames)
+    })
+
+    tasks = []
+    for i, filename in enumerate(add_request.filenames):
+        priority = len(add_request.filenames) - i
+        task = await queue.add_task(
+            batch_id=batch_id,
+            filename=filename,
+            file_size=0,
             user_id=current_user.id if current_user else None,
             priority=priority,
         )
@@ -1755,14 +1841,17 @@ async def start_batch_processing(
         raise HTTPException(status_code=404, detail="Batch not found")
 
     # Check if there are any files ready to process
+    # Note: Tasks may already be processing (the queue auto-picks them up),
+    # so we only error if there's truly nothing to do
     pending = status['pending']
-    if pending == 0:
+    in_progress = status['inProgress']
+    if pending == 0 and in_progress == 0 and status['completed'] == 0:
         raise HTTPException(status_code=400, detail="No pending files to process")
 
     return {
         "status": "ok",
         "batchId": batch_id,
-        "message": f"Started processing {pending} files",
+        "message": f"Processing batch ({pending} pending, {in_progress} in progress)",
     }
 
 
@@ -1792,24 +1881,40 @@ async def stream_batch_progress(
     queue.register_progress_callback(batch_id, on_progress)
 
     async def event_generator():
+        import time
+        KEEPALIVE_INTERVAL = 15  # seconds
+        last_send_time = time.monotonic()
+
         try:
             # Send initial status
             status = await queue.get_batch_status(batch_id)
             yield f"data: {json.dumps({'type': 'status', **status})}\n\n"
+            await asyncio.sleep(0)  # flush
+            last_send_time = time.monotonic()
 
             # Stream events
             while True:
                 try:
-                    # Check for new events (non-blocking)
-                    while not event_queue.empty():
+                    # Drain one event at a time with an async break so
+                    # uvicorn/Starlette can flush each SSE frame individually
+                    if not event_queue.empty():
                         event = event_queue.get_nowait()
                         yield f"data: {json.dumps(event)}\n\n"
+                        await asyncio.sleep(0)  # flush to client
+                        last_send_time = time.monotonic()
 
                         # Exit if batch is complete
                         if event.get('type') == 'batch_complete':
                             return
-
-                    await asyncio.sleep(0.1)
+                    else:
+                        # Send keepalive comment to prevent proxies/browsers
+                        # from killing idle connections (e.g. during long
+                        # MinerU PDF extraction that can take minutes)
+                        if time.monotonic() - last_send_time >= KEEPALIVE_INTERVAL:
+                            yield ": keepalive\n\n"
+                            await asyncio.sleep(0)
+                            last_send_time = time.monotonic()
+                        await asyncio.sleep(0.5)
                 except Exception as e:
                     logger.error(f"Error in SSE stream: {e}")
                     break

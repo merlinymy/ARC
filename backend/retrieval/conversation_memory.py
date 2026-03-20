@@ -37,6 +37,8 @@ class ConversationContext:
 class ConversationMemory:
     """Manage multi-turn conversation state for RAG."""
 
+    MAX_PAPER_CONTEXT = 50  # Cap paper_context to prevent unbounded growth
+
     def __init__(
         self,
         max_turns: int = 10,
@@ -77,13 +79,20 @@ class ConversationMemory:
         """Add an assistant message to history."""
         msg_metadata = metadata or {}
 
-        # Extract paper context from sources
+        # Extract paper context from sources (bounded to prevent memory growth)
         if sources:
             for source in sources[:5]:  # Top 5 sources
                 paper_id = source.get('paper_id', '')
                 title = source.get('title', '')
                 if paper_id and title:
                     self.paper_context[paper_id] = title
+
+            # Evict oldest entries if over limit
+            if len(self.paper_context) > self.MAX_PAPER_CONTEXT:
+                excess = len(self.paper_context) - self.MAX_PAPER_CONTEXT
+                keys_to_remove = list(self.paper_context.keys())[:excess]
+                for key in keys_to_remove:
+                    del self.paper_context[key]
 
             msg_metadata['source_count'] = len(sources)
 

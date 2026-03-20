@@ -911,6 +911,7 @@ class QueryEngine:
         effective_temperature = temperature if temperature is not None else 0.3
 
         # STEP 1: Generate RAG answer first
+        logger.info(f"[QUERY_ENGINE] Starting RAG answer generation with temperature={effective_temperature}")
         answer = self._generate_answer(
             query=query,
             query_type=query_type,
@@ -926,6 +927,15 @@ class QueryEngine:
             enable_pdf_upload=enable_pdf_upload,
         )
         timing_generation_ms = (time.perf_counter() - timing_generation_start) * 1000
+
+        # Verify what we got back from _generate_answer
+        import hashlib
+        answer_hash = hashlib.md5(answer.encode()).hexdigest()
+        logger.info(f"[QUERY_ENGINE] RAG answer generation completed in {timing_generation_ms:.2f}ms")
+        logger.info(f"[QUERY_ENGINE] Returned answer length: {len(answer)} chars")
+        logger.info(f"[QUERY_ENGINE] Returned answer MD5: {answer_hash}")
+        logger.info(f"[QUERY_ENGINE] Returned answer preview: {answer[:200]}...")
+
         emit("generation", {"status": "complete"})
         emit("answer_complete", {"answer": answer})
 
@@ -1102,6 +1112,15 @@ class QueryEngine:
             )
         except Exception as e:
             logger.warning(f"Failed to record analytics: {e}")
+
+        # Log the QueryResult being returned
+        import hashlib
+        result_answer_hash = hashlib.md5(answer.encode()).hexdigest()
+        logger.info(f"[QUERY_ENGINE] Creating QueryResult object")
+        logger.info(f"[QUERY_ENGINE] QueryResult.answer length: {len(answer)} chars, MD5: {result_answer_hash}")
+        if web_search_answer:
+            ws_hash = hashlib.md5(web_search_answer.encode()).hexdigest()
+            logger.info(f"[QUERY_ENGINE] QueryResult.web_search_answer length: {len(web_search_answer)} chars, MD5: {ws_hash}")
 
         return QueryResult(
             query=query,
@@ -1329,12 +1348,18 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
                     "messages": messages,
                 }
 
+                logger.info("[STREAMING] Starting RAG answer generation with streaming")
                 with self.anthropic.messages.stream(**stream_kwargs) as stream:
                     for text in stream.text_stream:
                         full_response.append(text)
                         stream_callback(text)
 
                 rag_response = "".join(full_response)
+
+                # Log content verification
+                logger.info(f"[STREAMING] RAG answer streaming completed - Total length: {len(rag_response)} chars")
+                logger.info(f"[STREAMING] RAG answer preview: {rag_response[:200]}...")
+                logger.info(f"[STREAMING] RAG answer hash: {hash(rag_response)}")
 
                 # Web search is now handled separately in the query() method
                 return rag_response
@@ -1497,7 +1522,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
 
             # Build final result from answer text blocks only (not all streamed text)
             final_text = "".join(answer_text_blocks).strip()
-            logger.info(f"Building final result: {len(final_text)} chars of text, {len(collected_urls)} URLs collected")
+            logger.info(f"[WEB_SEARCH] Building final result: {len(final_text)} chars of text, {len(collected_urls)} URLs collected")
 
             if final_text:
                 # Deduplicate URLs
@@ -1508,7 +1533,12 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
                         seen_urls.add(url_info['url'])
                         unique_urls.append(url_info)
 
-                logger.info(f"Web search SUCCESS: Returning {len(final_text)} chars with {len(unique_urls)} unique URLs")
+                # Log what we're returning
+                import hashlib
+                ws_hash = hashlib.md5(final_text.encode()).hexdigest()
+                logger.info(f"[WEB_SEARCH] SUCCESS: Returning {len(final_text)} chars with {len(unique_urls)} unique URLs")
+                logger.info(f"[WEB_SEARCH] Content MD5: {ws_hash}")
+                logger.info(f"[WEB_SEARCH] Content preview: {final_text[:200]}...")
                 return (final_text, unique_urls[:10])  # Limit to 10 sources
             else:
                 logger.warning(f"Web search returned no answer text (but found {len(collected_urls)} URLs)")

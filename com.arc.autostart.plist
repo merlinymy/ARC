@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.arc.autostart</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/merlin/projects/ARC/restart_server.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/merlin/projects/ARC</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/merlin/projects/ARC/backend/logs/autostart.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/merlin/projects/ARC/backend/logs/autostart-error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+    </dict>
+
+    <!-- Wait 30 seconds after boot before starting -->
+    <key>StartInterval</key>
+    <integer>30</integer>
+
+    <!-- Only run once at boot -->
+    <key>LaunchOnlyOnce</key>
+    <true/>
+</dict>
+</plist>

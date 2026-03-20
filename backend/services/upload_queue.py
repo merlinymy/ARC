@@ -8,9 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from sqlalchemy import select, update
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import Session
 
+from config import Settings
 from database.models import UploadTask
 from services.paper_library import PaperLibraryService
 
@@ -50,6 +52,10 @@ class UploadQueueService:
         self._processing_tasks: Set[str] = set()
         self._process_task: Optional[asyncio.Task] = None
 
+        # Create a synchronous engine for thread-pool progress updates
+        settings = Settings()
+        self._sync_engine = create_engine(settings.database_url, echo=False)
+
     async def start(self) -> None:
         """Start the queue processor."""
         if self._running:
@@ -80,6 +86,7 @@ class UploadQueueService:
             await asyncio.sleep(0.5)
 
         self._executor.shutdown(wait=True)
+        self._sync_engine.dispose()
         logger.info("Upload queue service stopped")
 
     async def _recover_interrupted_tasks(self) -> None:
@@ -226,29 +233,34 @@ class UploadQueueService:
             return {'success': False, 'error': 'File not found'}
 
         def progress_callback(step: str, data: Dict[str, Any]):
-            """Progress callback that emits SSE events."""
-            # Map step names to progress percentages
-            step_progress = {
-                'processing': 5,
-                'extracting': 35,
-                'chunking': 45,
-                'embedding': 75,
-                'indexing': 90,
-                'complete': 100,
-                'error': 0,
+            """Progress callback that emits SSE events with sub-step interpolation."""
+            # Map step names to base and next-step percentages
+            step_ranges = {
+                'processing': (0, 5),
+                'extracting': (5, 35),
+                'chunking': (35, 45),
+                'embedding': (45, 75),
+                'indexing': (75, 90),
+                'complete': (100, 100),
+                'error': (0, 0),
             }
 
-            progress_percent = step_progress.get(step, 0)
+            base, next_base = step_ranges.get(step, (0, 0))
+            sub_progress = data.get('sub_progress', 0.0)
+            progress_percent = int(base + sub_progress * (next_base - base))
 
             # Emit progress event
-            self._emit_progress(batch_id, {
+            event = {
                 'type': 'task_progress',
                 'taskId': task_id,
                 'status': step,
                 'currentStep': data.get('message', step),
                 'progressPercent': progress_percent,
                 'paperId': data.get('paper_id'),
-            })
+            }
+            callbacks = self._progress_callbacks.get(batch_id, [])
+            logger.info(f"Task {task_id}: {step} {progress_percent}% (callbacks: {len(callbacks)})")
+            self._emit_progress(batch_id, event)
 
             # Update database (synchronously via new connection)
             self._update_task_progress_sync(task_id, step, progress_percent, data.get('message'))
@@ -266,11 +278,22 @@ class UploadQueueService:
     ) -> None:
         """Update task progress in database synchronously.
 
-        Note: This creates a new synchronous connection since it's called from a thread.
+        Uses a synchronous engine since this is called from a ThreadPoolExecutor.
         """
-        # We'll update the database asynchronously via the emit mechanism
-        # For now, just log the progress
-        logger.debug(f"Task {task_id}: {status} - {progress_percent}%")
+        try:
+            with Session(self._sync_engine) as session:
+                session.execute(
+                    update(UploadTask)
+                    .where(UploadTask.id == task_id)
+                    .values(
+                        status=status,
+                        progress_percent=progress_percent,
+                        current_step=current_step,
+                    )
+                )
+                session.commit()
+        except Exception as e:
+            logger.error(f"Failed to update task progress in DB: {e}")
 
     async def _check_batch_complete(self, batch_id: str) -> None:
         """Check if all tasks in a batch are complete and emit batch_complete event."""

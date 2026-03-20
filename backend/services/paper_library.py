@@ -84,8 +84,27 @@ class PaperLibraryService:
         self.embedder = embedder
         self.bm25_vectorizer = bm25_vectorizer
 
+        # Reusable PDF processor - avoids re-loading MinerU ML models per upload
+        self._processor: Optional["EnhancedPDFProcessor"] = None
+
         # Ensure upload directory exists
         self.upload_dir.mkdir(parents=True, exist_ok=True)
+
+    def _get_processor(self) -> "EnhancedPDFProcessor":
+        """Get or create the reusable PDF processor.
+
+        Reuses a single EnhancedPDFProcessor (and its MinerU models) across
+        all uploads to avoid re-loading multi-GB ML models per paper.
+        """
+        if self._processor is None:
+            self._processor = EnhancedPDFProcessor(
+                abstract_max_tokens=settings.abstract_max_tokens,
+                section_max_tokens=settings.section_max_tokens,
+                fine_chunk_tokens=settings.fine_chunk_tokens,
+                fine_chunk_overlap=settings.fine_chunk_overlap,
+                extraction_timeout=settings.pdf_extraction_timeout,
+            )
+        return self._processor
 
     def _generate_paper_id(self, filename: str) -> str:
         """Generate a unique paper ID from filename (same as index_papers.py)."""
@@ -745,6 +764,17 @@ class PaperLibraryService:
             del paper_metadata[paper_id]
             checkpoint["paper_metadata"] = paper_metadata
 
+        # Remove file hash so the same file can be re-uploaded
+        file_hashes = checkpoint.get("file_hashes", {})
+        hashes_to_remove = [h for h, pid in file_hashes.items() if pid == paper_id]
+        for h in hashes_to_remove:
+            del file_hashes[h]
+        if hashes_to_remove:
+            checkpoint["file_hashes"] = file_hashes
+            logger.info(f"Removed {len(hashes_to_remove)} file hash(es) for paper {paper_id}")
+        else:
+            logger.warning(f"No file hashes found for paper {paper_id} during deletion")
+
         self._save_checkpoint(checkpoint)
         result["checkpoint_updated"] = True
 
@@ -809,30 +839,125 @@ class PaperLibraryService:
                 progress_callback(step, data or {})
 
         try:
-            emit_progress("processing", {"message": "Processing PDF..."})
+            emit_progress("processing", {"message": "Processing PDF...", "sub_progress": 0.0})
 
-            # Initialize processor
-            processor = EnhancedPDFProcessor(
-                abstract_max_tokens=settings.abstract_max_tokens,
-                section_max_tokens=settings.section_max_tokens,
-                fine_chunk_tokens=settings.fine_chunk_tokens,
-                fine_chunk_overlap=settings.fine_chunk_overlap,
-                extraction_timeout=settings.pdf_extraction_timeout,
-            )
+            # Reuse processor to avoid re-loading MinerU ML models per upload
+            processor = self._get_processor()
 
             # Process PDF into chunks
-            emit_progress("extracting", {"message": "Extracting content..."})
-            chunks: List[Chunk] = processor.process_pdf(pdf_path, paper_id)
+            # MinerU uses tqdm progress bars internally (Layout Predict, MFR Predict,
+            # OCR-det, etc.). We intercept them to forward real extraction progress
+            # to the frontend, keeping the SSE connection alive during long extractions.
+            #
+            # IMPORTANT: MinerU does `from tqdm import tqdm` at import time, creating
+            # local references. Replacing tqdm_module.tqdm with a subclass does NOT
+            # affect those references. Instead, we patch __init__, update, and close
+            # on the ORIGINAL tqdm class so all existing references pick up the hooks.
+            from tqdm import tqdm as _tqdm_cls
+
+            emit_progress("extracting", {"message": "Extracting text from PDF...", "sub_progress": 0.0})
+
+            # Known MinerU tqdm stages and their weight in overall extraction
+            _STAGE_WEIGHTS = {
+                "Layout Predict": 0.25,
+                "MFD Predict": 0.15,
+                "MFR Predict": 0.15,
+                "OCR-det": 0.10,
+                "OCR-det Predict": 0.05,
+                "Table-ocr det": 0.05,
+                "Table-wired Predict": 0.05,
+            }
+            _extraction_sub = 0.0  # tracks cumulative sub_progress (0.0 - 0.7)
+
+            # Save original methods
+            _orig_init = _tqdm_cls.__init__
+            _orig_update = _tqdm_cls.update
+            _orig_close = _tqdm_cls.close
+
+            def _patched_init(self, *args, **kwargs):
+                _orig_init(self, *args, **kwargs)
+                # Attach tracking attributes after normal init
+                desc = getattr(self, 'desc', '') or ''
+                self._arc_stage_weight = 0.0
+                self._arc_stage_desc = desc
+                for prefix, weight in _STAGE_WEIGHTS.items():
+                    if desc.startswith(prefix):
+                        self._arc_stage_weight = weight
+                        break
+                self._arc_last_reported = -1
+
+            def _patched_update(self, n=1):
+                _orig_update(self, n)
+                nonlocal _extraction_sub
+                weight = getattr(self, '_arc_stage_weight', 0)
+                if weight > 0 and self.total and self.total > 0:
+                    pct = int(self.n / self.total * 100)
+                    last = getattr(self, '_arc_last_reported', -1)
+                    # Emit every 10% to avoid flooding
+                    if pct // 10 > last // 10:
+                        self._arc_last_reported = pct
+                        frac = self.n / self.total
+                        current_sub = min(0.7, _extraction_sub + weight * frac)
+                        desc = getattr(self, '_arc_stage_desc', '')
+                        emit_progress("extracting", {
+                            "message": f"{desc}... {pct}%",
+                            "sub_progress": current_sub,
+                        })
+
+            def _patched_close(self):
+                nonlocal _extraction_sub
+                weight = getattr(self, '_arc_stage_weight', 0)
+                if weight > 0:
+                    _extraction_sub = min(0.7, _extraction_sub + weight)
+                    desc = getattr(self, '_arc_stage_desc', '')
+                    emit_progress("extracting", {
+                        "message": f"{desc} complete",
+                        "sub_progress": _extraction_sub,
+                    })
+                _orig_close(self)
+
+            # Patch methods on the original class (affects all existing references)
+            _tqdm_cls.__init__ = _patched_init
+            _tqdm_cls.update = _patched_update
+            _tqdm_cls.close = _patched_close
+            try:
+                chunks: List[Chunk] = processor.process_pdf(pdf_path, paper_id)
+            finally:
+                # Restore original methods
+                _tqdm_cls.__init__ = _orig_init
+                _tqdm_cls.update = _orig_update
+                _tqdm_cls.close = _orig_close
 
             if not chunks:
                 result["error"] = "No chunks extracted from PDF"
                 return result
 
-            emit_progress("embedding", {"message": f"Generating embeddings for {len(chunks)} chunks..."})
+            emit_progress("extracting", {"message": "Parsing document structure...", "sub_progress": 0.8})
 
-            # Generate embeddings
+            # Count chunk types for reporting
+            chunk_type_counts: Dict[str, int] = {}
+            for c in chunks:
+                ct = c.chunk_type.value if hasattr(c.chunk_type, 'value') else str(c.chunk_type)
+                chunk_type_counts[ct] = chunk_type_counts.get(ct, 0) + 1
+
+            emit_progress("chunking", {
+                "message": f"Creating chunks... ({len(chunks)} chunks, {len(chunk_type_counts)} types)",
+                "sub_progress": 0.5,
+            })
+
+            emit_progress("embedding", {"message": f"Generating embeddings for {len(chunks)} chunks...", "sub_progress": 0.0})
+
+            # Generate embeddings with per-batch progress
             texts = [chunk.text for chunk in chunks]
-            embeddings = self.embedder.embed_documents(texts)
+
+            def embedding_progress(batch_idx: int, total_batches: int):
+                sub = batch_idx / total_batches if total_batches > 0 else 1.0
+                emit_progress("embedding", {
+                    "message": f"Generating embeddings (batch {batch_idx}/{total_batches})...",
+                    "sub_progress": sub,
+                })
+
+            embeddings = self.embedder.embed_documents(texts, progress_callback=embedding_progress)
 
             # Create full-paper embedding
             pooling_texts = [c.text for c in chunks if c.chunk_type in [ChunkType.ABSTRACT, ChunkType.SECTION]]
@@ -854,13 +979,21 @@ class PaperLibraryService:
                 chunks.append(full_chunk)
                 embeddings.append(full_embedding)
 
-            emit_progress("indexing", {"message": "Storing in vector database..."})
+            emit_progress("indexing", {
+                "message": f"Storing {len(chunks)} chunks in vector database...",
+                "sub_progress": 0.0,
+            })
 
             # Prepare and upsert to Qdrant
             chunk_ids = [chunk.chunk_id for chunk in chunks]
             payloads = [chunk.to_payload() for chunk in chunks]
 
             self.store.upsert_chunks(chunk_ids, embeddings, payloads)
+
+            emit_progress("indexing", {
+                "message": "Updating metadata...",
+                "sub_progress": 0.7,
+            })
 
             # Update checkpoint
             checkpoint = self._load_checkpoint()

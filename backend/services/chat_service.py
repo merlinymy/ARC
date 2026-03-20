@@ -113,6 +113,15 @@ class ChatService:
         if conversation is None:
             raise ValueError(f"Conversation not found: {conversation_id}")
 
+        # Log what we're about to persist
+        import hashlib
+        content_hash = hashlib.md5(content.encode()).hexdigest()
+        logger.info(f"[CHAT_SERVICE] Adding message to conversation {conversation_id}")
+        logger.info(f"[CHAT_SERVICE] Role: {role}, Length: {len(content)} chars")
+        logger.info(f"[CHAT_SERVICE] Content MD5: {content_hash}")
+        logger.info(f"[CHAT_SERVICE] Content preview: {content[:150]}...")
+        logger.info(f"[CHAT_SERVICE] Has metadata: {metadata is not None}")
+
         message = Message(
             conversation_id=conversation_id,
             role=role,
@@ -130,6 +139,8 @@ class ChatService:
 
         await self.session.commit()
         await self.session.refresh(message)
+
+        logger.info(f"[CHAT_SERVICE] Message committed with ID: {message.id}")
         return message
 
     async def get_messages(

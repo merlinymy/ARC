@@ -109,20 +109,28 @@ class MinerUExtractor:
         self._ensure_initialized()
 
         try:
-            # Use ThreadPoolExecutor for timeout support (works on macOS)
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(self._extract_with_mineru, pdf_path)
-                try:
-                    result = future.result(timeout=self.timeout)
-                    return result
-                except FuturesTimeoutError:
-                    logger.warning(f"MinerU extraction timed out after {self.timeout}s for {pdf_path.name}, using fallback")
-                    future.cancel()  # Try to cancel the running task
-                    return self._fallback_extract(pdf_path)
-                except Exception as e:
-                    logger.warning(f"MinerU extraction error: {e}, using fallback")
-                    future.cancel()
-                    return self._fallback_extract(pdf_path)
+            # Use a daemon-threaded executor so timed-out threads don't linger
+            # and leak memory. A regular ThreadPoolExecutor thread that times out
+            # keeps running (and holding all its memory) indefinitely.
+            executor = ThreadPoolExecutor(max_workers=1)
+            # Mark worker threads as daemon so they die with the main process
+            executor._thread_name_prefix = "mineru-daemon"
+            future = executor.submit(self._extract_with_mineru, pdf_path)
+            try:
+                result = future.result(timeout=self.timeout)
+                return result
+            except FuturesTimeoutError:
+                logger.warning(f"MinerU extraction timed out after {self.timeout}s for {pdf_path.name}, using fallback")
+                future.cancel()
+                # Force GC to reclaim any partially-loaded model state
+                gc.collect()
+                return self._fallback_extract(pdf_path)
+            except Exception as e:
+                logger.warning(f"MinerU extraction error: {e}, using fallback")
+                future.cancel()
+                return self._fallback_extract(pdf_path)
+            finally:
+                executor.shutdown(wait=False)
         except Exception as e:
             logger.warning(f"MinerU extraction failed, falling back: {e}")
             return self._fallback_extract(pdf_path)

@@ -21,13 +21,101 @@ import tempfile
 import json
 import re
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import tiktoken
 import multiprocessing
 import gc
 
 from .models import ChunkType, PaperMetadata, Chunk
 from .chunker import PaperChunker
+
+
+def _subprocess_mineru_extract(pdf_path_str: str, lang: str, use_gpu: bool, result_queue):
+    """Run MinerU extraction in an isolated subprocess.
+
+    Must be a top-level function for multiprocessing pickling.
+    """
+    pdf_path = Path(pdf_path_str)
+
+    from mineru.cli.common import read_fn
+    from mineru.backend.pipeline.pipeline_analyze import doc_analyze
+    from mineru.backend.pipeline.model_json_to_middle_json import result_to_middle_json
+    from mineru.backend.pipeline.pipeline_middle_json_mkcontent import union_make
+    from mineru.data.data_reader_writer import FileBasedDataWriter
+    from mineru.utils.enum_class import MakeMode
+
+    pdf_bytes = read_fn(pdf_path)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        image_writer = FileBasedDataWriter(tmp_dir)
+
+        infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled = doc_analyze(
+            [pdf_bytes], [lang], parse_method="auto", formula_enable=True, table_enable=True
+        )
+
+        middle_json = result_to_middle_json(
+            infer_results[0], all_image_lists[0], all_pdf_docs[0],
+            image_writer, lang, ocr_enabled[0]
+        )
+
+        pdf_info = middle_json.get("pdf_info", [])
+        markdown = union_make(pdf_info, MakeMode.MM_MD, tmp_dir)
+        content_list = union_make(pdf_info, MakeMode.CONTENT_LIST, tmp_dir)
+
+        # Use a temporary extractor instance to call helper methods
+        extractor = MinerUExtractor.__new__(MinerUExtractor)
+        extractor.lang = lang
+        extractor.use_gpu = use_gpu
+        extractor._initialized = True
+
+        full_text = extractor._extract_text_from_content(content_list)
+        tables = extractor._extract_tables_from_content(content_list)
+        figures = extractor._extract_figures_from_content(content_list)
+        captions = extractor._extract_captions_from_markdown(markdown)
+        metadata = extractor._extract_metadata(pdf_path, middle_json)
+
+        result_queue.put({
+            'full_text': full_text, 'markdown': markdown,
+            'tables': tables, 'figures': figures,
+            'captions': captions, 'metadata': metadata,
+        })
+
+
+def _subprocess_fallback_extract(pdf_path_str: str, result_queue):
+    """Run pypdfium2 fallback extraction in an isolated subprocess.
+
+    Prevents PDFium native library state corruption in long-running processes.
+    Must be a top-level function for multiprocessing pickling.
+    """
+    import pypdfium2 as pdfium
+
+    pdf_path = Path(pdf_path_str)
+    doc = None
+    try:
+        doc = pdfium.PdfDocument(pdf_path)
+        text_parts = []
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            textpage = page.get_textpage()
+            text_parts.append(textpage.get_text_bounded())
+            textpage.close()
+        full_text = "\n\n".join(text_parts)
+        result_queue.put({
+            'full_text': full_text, 'markdown': full_text,
+            'tables': [], 'figures': [], 'captions': [],
+            'metadata': {'title': pdf_path.stem, 'num_pages': len(doc), 'file_name': pdf_path.name},
+        })
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Fallback extraction failed in subprocess: {e}")
+        result_queue.put({
+            'full_text': '', 'markdown': '', 'tables': [], 'figures': [], 'captions': [],
+            'metadata': {'title': pdf_path.stem, 'file_name': pdf_path.name, 'num_pages': 0},
+        })
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
 
 # Set multiprocessing start method to 'spawn' for macOS safety
 # This prevents fork() issues with MinerU's multiprocessing
@@ -100,40 +188,70 @@ class MinerUExtractor:
     def extract(self, pdf_path: Path) -> MinerUContent:
         """Extract all content from a PDF using MinerU.
 
+        Runs extraction in a subprocess to prevent PDFium native library
+        state corruption in long-running processes.
+
         Args:
             pdf_path: Path to PDF file
 
         Returns:
             MinerUContent with extracted text, tables, figures, etc.
         """
-        self._ensure_initialized()
+        import queue
+
+        result_queue = multiprocessing.Queue()
+        proc = multiprocessing.Process(
+            target=_subprocess_mineru_extract,
+            args=(str(pdf_path), self.lang, self.use_gpu, result_queue),
+        )
+        proc.start()
+
+        # Read from queue BEFORE joining to avoid deadlock.
+        # Queue.put() blocks if the pipe buffer is full, and proc.join()
+        # waits for the process to exit — if join() comes first, both sides
+        # wait for each other forever.
+        try:
+            result_dict = result_queue.get(timeout=self.timeout)
+            proc.join(10)
+            return MinerUContent(**result_dict)
+        except queue.Empty:
+            logger.warning(f"MinerU extraction timed out after {self.timeout}s for {pdf_path.name}, using fallback")
+        except Exception as e:
+            logger.warning(f"MinerU extraction failed: {e}, using fallback")
+        finally:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(5)
+                if proc.is_alive():
+                    proc.kill()
+
+        # Fallback: run pypdfium2 in a separate subprocess
+        result_queue = multiprocessing.Queue()
+        proc = multiprocessing.Process(
+            target=_subprocess_fallback_extract,
+            args=(str(pdf_path), result_queue),
+        )
+        proc.start()
 
         try:
-            # Use a daemon-threaded executor so timed-out threads don't linger
-            # and leak memory. A regular ThreadPoolExecutor thread that times out
-            # keeps running (and holding all its memory) indefinitely.
-            executor = ThreadPoolExecutor(max_workers=1)
-            # Mark worker threads as daemon so they die with the main process
-            executor._thread_name_prefix = "mineru-daemon"
-            future = executor.submit(self._extract_with_mineru, pdf_path)
-            try:
-                result = future.result(timeout=self.timeout)
-                return result
-            except FuturesTimeoutError:
-                logger.warning(f"MinerU extraction timed out after {self.timeout}s for {pdf_path.name}, using fallback")
-                future.cancel()
-                # Force GC to reclaim any partially-loaded model state
-                gc.collect()
-                return self._fallback_extract(pdf_path)
-            except Exception as e:
-                logger.warning(f"MinerU extraction error: {e}, using fallback")
-                future.cancel()
-                return self._fallback_extract(pdf_path)
-            finally:
-                executor.shutdown(wait=False)
+            result_dict = result_queue.get(timeout=60)
+            proc.join(10)
+            return MinerUContent(**result_dict)
+        except queue.Empty:
+            logger.error(f"Fallback extraction timed out for {pdf_path.name}")
         except Exception as e:
-            logger.warning(f"MinerU extraction failed, falling back: {e}")
-            return self._fallback_extract(pdf_path)
+            logger.error(f"Fallback extraction failed: {e}")
+        finally:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(5)
+                if proc.is_alive():
+                    proc.kill()
+
+        return MinerUContent(
+            full_text="", markdown="", tables=[], figures=[], captions=[],
+            metadata={"title": pdf_path.stem, "file_name": pdf_path.name, "num_pages": 0},
+        )
 
     def _extract_with_mineru(self, pdf_path: Path) -> MinerUContent:
         """Extract using MinerU pipeline."""

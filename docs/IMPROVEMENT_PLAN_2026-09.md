@@ -44,7 +44,7 @@ Two denominators appear below and they are not interchangeable: **4,792** papers
 | R1 | Reads `item["latex"]`/`item["text"]` for tables; MinerU emits `table_body` | `preprocessing/pdf_processor.py:358` | Zero table chunks. `FACTUAL` strategy queries an empty chunk type. |
 | R2 | Caption regex `finditer` over full markdown matches in-text "Figure 3…" mentions | `preprocessing/pdf_processor.py:381-400` | 93k pseudo-caption chunks crowding out real content. MinerU's clean `image_caption`/`table_caption` lists ignored. |
 | R3 | Sections truncated to 3–4k tokens, then fine chunks built from the **truncated** text | `preprocessing/chunker.py:371, 394-401` | Tails of long Results/Discussion sections never indexed at any granularity. |
-| R4 | `enable_hybrid_search` never passed, defaults `False`; sparse vectors written anyway | `dependencies.py:109-126`, `retrieval/query_engine.py:462` | Dense-only retrieval. BM25 computed and stored for 212k chunks, never queried. |
+| R4 | **DONE 2026-09-15.** `enable_hybrid_search` never passed, defaults `False`; sparse vectors written anyway | `dependencies.py:109-126`, `retrieval/query_engine.py:462` | Dense-only retrieval. BM25 computed and stored for 212k chunks, never queried. |
 | R5 | Sources cut to 1,000 chars before the model sees them; parent context = first 500 chars of section | `retrieval/query_engine.py:1559, 1215` | Retrieved evidence discarded pre-generation; parent window is not around the match. |
 | R6 | `Chunk.page_numbers` defined in model + payload, never populated; MinerU `page_idx`/`bbox` discarded | `preprocessing/chunker.py` (all constructors), `pdf_processor.py:337-348` | No provenance possible. `PdfViewer.tsx` iframe opens at page 1. |
 | R7 | `ConversationMemory` is a process-global singleton, 2,000-token window, not keyed by conversation | `retrieval/query_engine.py:524, 1304`; `dependencies.py:107` | Cross-thread contamination. `selectConversation` never resets it. |
@@ -53,10 +53,10 @@ Two denominators appear below and they are not interchangeable: **4,792** papers
 | R10 | "Confidence" = LLM self-reported float, or bag-of-words overlap on parse failure; UI keeps the min per source | `retrieval/citation_verifier.py:144-210`, `ResponseCard.tsx:112` | The percentage is not a meaningful quantity. |
 | R11 | UI relevance bar shows pre-rerank `score`; `rerank_score` computed and never read | `api/main.py:829`, `retrieval/reranker.py:79` | Displayed relevance is the wrong number. |
 | R12 | `response_mode` defaults `detailed`, whose prompts mandate numbered report scaffolds at 32k max_tokens | `retrieval/query_engine.py:199-322, 544` | The "book report" voice. |
-| R13 | BM25 IDF cache `doc_count` = 13,979 against 212,953 points (**6.6% coverage**), and `bm25.py:282` bakes `idf` into the **stored document vectors** rather than applying it at query time | `data/bm25_idf_cache.json`, `retrieval/bm25.py:266-283` | Every stored sparse vector is stamped with 6.6%-coverage statistics. A cache rebuild alone would leave query-side IDF disagreeing with doc-side IDF, so fixing this means **re-vectorizing and re-upserting all 212,953 sparse vectors** (zero API cost — computed locally from stored text — but a real batch job). Confirmed live: sparse vectors are present and populated (112 terms on a sampled point), and hybrid already surfaces 7-8 of 15 chunks that dense-only misses *despite* the handicap. |
+| R13 | **DONE 2026-09-15.** The sparse index was unusable noise: `_term_to_index` used Python's `hash()`, which is salted per process, so the indexer wrote terms into dimensions the API process could never read (repeated sparse searches shared 0/15 results). Also `max_vocab_size` 50,000 vs a 247,831-term vocabulary (99.3% bucket collisions), `avg_doc_length` hardcoded 500 vs a true 121.67, and IDF baked into stored vectors. Original note follows: IDF cache `doc_count` = 13,979 against 212,953 points (**6.6% coverage**), and `bm25.py:282` bakes `idf` into the **stored document vectors** rather than applying it at query time | `data/bm25_idf_cache.json`, `retrieval/bm25.py:266-283` | Every stored sparse vector is stamped with 6.6%-coverage statistics. A cache rebuild alone would leave query-side IDF disagreeing with doc-side IDF, so fixing this means **re-vectorizing and re-upserting all 212,953 sparse vectors** (zero API cost — computed locally from stored text — but a real batch job). Confirmed live: sparse vectors are present and populated (112 terms on a sampled point), and hybrid already surfaces 7-8 of 15 chunks that dense-only misses *despite* the handicap. |
 | R14 | Models are three generations behind, and `temperature` is passed on every call | `config.py:99-103`; `query_engine.py:1346, 1372, 1448`; `query_classifier.py:232, 329`; `api/main.py:354` | ARC **cannot run on a current model at all** — `temperature` is a 400 on Opus 4.7+ and on Sonnet 5. Also pins the stale `web_search_20250305` tool. See §3b.0. |
 | R15 | No prompt caching anywhere | all Anthropic call sites | Every turn re-bills the full system prompt and all source text. Compounds badly once W3 feeds real history. See §3b.3. |
-| R17 | The `FACTUAL` retrieval strategy searches `["fine", "table", "caption"]` — a chunk type with **zero** members, 93k caption fragments, and neither `section` nor `abstract` | `retrieval/query_classifier.py:54-59` (`RETRIEVAL_STRATEGIES`) | **Measured after the W0 migration: 5 of 8 sampled real user queries classify `FACTUAL`**, so the highest-traffic path is the worst-configured one. Excludes 26,758 `section` chunks of real body text while including a dead filter term. Plausibly the largest single contributor to "it consistently misses things" on the numeric questions the user values most. |
+| R17 | **SUBSUMED by the §4b architecture decision — do not fix separately.** The `FACTUAL` retrieval strategy searches `["fine", "table", "caption"]` — a chunk type with **zero** members, 93k caption fragments, and neither `section` nor `abstract` | `retrieval/query_classifier.py:54-59` (`RETRIEVAL_STRATEGIES`) | **Measured after the W0 migration: 5 of 8 sampled real user queries classify `FACTUAL`**, so the highest-traffic path is the worst-configured one. Excludes 26,758 `section` chunks of real body text while including a dead filter term. Plausibly the largest single contributor to "it consistently misses things" on the numeric questions the user values most. |
 | R16 | Section and abstract detection is pure regex over raw lines — header must start a line, be <100 chars, and survive no markdown stripping | `preprocessing/section_detector.py` (`SECTION_PATTERNS`, `extract_abstract`) | **14.6% of papers get zero section chunks and 13.5% zero fine chunks**, because no section boundary is ever found. Only **46% of papers get an abstract chunk** at all. MinerU already emits `type: "title"` blocks that make this structural rather than heuristic. |
 
 ---
@@ -240,11 +240,32 @@ Four places the three sections pull against each other. Each needs a decision, n
 
 ---
 
+## 4b. Architecture decision — split retrieval from stance (agreed 2026-09-15)
+
+The original design routes every query through an LLM classifier into one of 8 `QueryType`s, each mapping to a fixed `RETRIEVAL_STRATEGIES` entry *and* one of 16 hand-written prompts. Three objections, and a reframe.
+
+**Hard filters, not soft preferences.** `chunk_types` and `section_filter` are exclusions applied *before* scoring. A misclassification does not rank the right chunk low — it makes it invisible. A soft judgement has been compiled into a hard constraint.
+
+**The commonest destination is the worst path.** Measured: 5 of 8 real user queries classify `FACTUAL`, whose strategy searches a zero-member `table` type and 93k pseudo-captions while excluding `section` (26,758 chunks) and `abstract` entirely.
+
+**It was designed for a weaker stack.** Pre-hoc routing earns its place when there is no reranker, no hybrid search and a small context window. With Cohere rerank, working BM25 and a 1M-token context, the reranker judges relevance better than a category guess made before anything is retrieved.
+
+**The reframe:** the router decides two unrelated things at once — *what to retrieve* (a retrieval concern) and *how to respond* (a generation concern). Conflating them is why the system is simultaneously fragile at retrieval and produces book-report prose. Separate the axes:
+
+| Axis | Old | New |
+|---|---|---|
+| Retrieval | 8 strategies with hard filters, chosen by classifier | **One path**: hybrid + rerank over all chunk types, wide `top_k`, soft boosts where evidence supports them |
+| Response stance | Implied by query type, 16 prompts | **User-selected mode** — Ask / Brainstorm / Develop / Refine / Critique / Draft — one base prompt plus stance modifiers |
+
+**Epistemic status differs by half, and so does the sequencing.** The stance half is requests 7 and 8 — asked for directly, needs no proof, implement now. The retrieval half is an argument, not a measurement: **gate it on W5**. Run the golden set through classifier-routed retrieval vs one broad hybrid path; if the classifier earns its place, keep it.
+
+---
+
 ## 5. Workstreams
 
 Total ≈ **4–5 weeks** of engineering, but arranged as three parallel tracks after day 2, so calendar time is shorter. Plus a one-time **60–80 h** unattended reindex and ≈**$60–115** API spend.
 
-### W0 — Platform baseline (~2 days, blocks everything)
+### W0 — Platform baseline — **COMPLETE 2026-09-15**
 
 R14, R15. Do this first; nothing else can ship on a supported model until it is done.
 

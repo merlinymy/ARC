@@ -264,7 +264,7 @@ The original design routes every query through an LLM classifier into one of 8 `
 
 ## 5. Workstreams
 
-Total ≈ **4–5 weeks** of engineering, but arranged as three parallel tracks after day 2, so calendar time is shorter. Plus a one-time **60–80 h** unattended reindex and ≈**$60–115** API spend.
+Total ≈ **4–5 weeks** of engineering, but arranged as three parallel tracks after day 2, so calendar time is shorter. Plus a one-time **~98 h** unattended reindex (measured 74 s/paper on a hard-weighted W1 sample; a representative corpus mean should land nearer 75 h) and ≈**$60–115** API spend.
 
 ### W0 — Platform baseline — **COMPLETE 2026-09-15**
 
@@ -285,7 +285,7 @@ Emit one structured record per paper from MinerU's `content_list`, with every bl
 3. **Equations and page text** — keep equation blocks and per-page text, both currently dropped. **Correction: the `content_list` type is `equation` (with `text` + `text_format: "latex"`), not `interline_equation`** — that is the `middle_json` block type.
 4. **Structural section and abstract detection (R16).** Derive section boundaries from MinerU's heading blocks instead of regex-matching raw lines, and take the abstract from the leading block sequence rather than `extract_abstract`'s pattern list. **Correction, measured 2026-09-15 across 50 papers: there is no `type: "title"` in `content_list`.** Headings arrive as `type: "text"` carrying a `text_level` key; `type: "title"` exists only in `middle_json['pdf_info'][i]['para_blocks']`. An earlier draft of this plan said otherwise, read from the existing code's `elif item_type == "title":` branch — which was itself dead, and part of why sections were broken. Keying on it would have found zero headings. `text_level` is also 1 for essentially every heading, so depth must come from the paper's own numbering. This is only possible *because* W1 builds the record — and it is what recovers the 14.6% of papers with no sections and the 54% with no abstract. Highest-leverage single item in W1 after the table fix.
 5. **The pypdfium2 fallback path (~3.1% of papers)** currently returns `tables=[]`, `captions=[]` and interleaved two-column text. It cannot produce a structured record, so mark those papers as degraded in the record and exclude them from claims about coverage rather than letting them silently look complete.
-6. **Persist it.** Today nothing is cached, so every chunking change costs a full 60–80 h re-extraction. After this, re-chunking is minutes and free — which is what makes W2, W5 and every later tuning pass affordable.
+6. **Persist it.** Today nothing is cached, so every chunking change costs a full ~98 h re-extraction. After this, re-chunking is minutes and free — which is what makes W2, W5 and every later tuning pass affordable.
 
 The record is simultaneously the substrate for citation offsets (§3b.1), the paper text for contextual retrieval (§3b.2), and the source for the long-context single-paper path (§3b.6). Build it once, correctly.
 
@@ -365,7 +365,7 @@ The reindex is one operation spanning W1 and W2 — persist extraction first, th
 ## 7. Open risks
 
 - **Hybrid retrieval is confirmed available, not hypothetical** (verified 2026-09-15 with Qdrant up): the collection declares *and populates* the `bm25` sparse vector across all 212,953 points, and hybrid returns 7-8 new chunks out of 15 on real user queries. The open question is now quality, not availability — and it cannot be judged until R13's re-vectorization lands, because the stored vectors carry 6.6%-coverage IDF.
-- **Reindex is 60-80h of wall time.** Persisting the paper record (W1) first converts that from a recurring cost into a one-time one.
+- **Reindex is ~98h of wall time** (measured, not estimated). Persisting the paper record (W1) first converts that from a recurring cost into a one-time one.
 - **Caption count will drop ~75%.** That is the intent, but total chunk count and retrieval behaviour will shift noticeably; the golden set is how we confirm it's an improvement.
 - **The model migration is not optional and not free.** Every Opus and Sonnet call site currently passes `temperature`, which is a 400 on the target models (§3b.0). Until that is fixed, ARC cannot run on a current model at all — so W0 is load-bearing for the whole plan, and the Settings temperature slider has to be redesigned as part of it.
 - **Citations constrain the generation call.** `citations` and `output_config.format` are mutually exclusive. If a later feature wants strict JSON out of the answering call, it has to give up native citations — so keep structured output for side calls (extraction, classification) and leave the answering call in prose-plus-citations form.

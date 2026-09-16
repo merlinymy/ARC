@@ -5,6 +5,7 @@ enabling hybrid search combining dense semantic embeddings
 with sparse lexical matching.
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -18,6 +19,21 @@ logger = logging.getLogger(__name__)
 
 # Default path for IDF cache persistence
 DEFAULT_IDF_CACHE_PATH = Path("data/bm25_idf_cache.json")
+
+# Scheme version for stored sparse vectors.
+#   1 = legacy: IDF baked into the *document* vector, term->index via builtin hash()
+#       (hash() is salted per process, so stored indices were not reproducible).
+#   2 = current: document vector holds only the TF/length-normalized BM25 component,
+#       IDF is applied on the *query* side, term->index via blake2b (process-stable).
+# Bump this whenever a change would invalidate already-stored document vectors.
+SPARSE_SCHEME_VERSION = 2
+
+# Hash space for term -> sparse index. The previous value (50,000) was far smaller than
+# the corpus vocabulary (247,831 distinct tokens over 212,953 chunks), so roughly every
+# bucket held several unrelated terms and the "lexical" arm matched on collisions.
+# At 2^22 about 6% of terms share a bucket with any other; the cost is a larger
+# dimension id space in Qdrant's in-memory sparse index, which is cheap.
+DEFAULT_MAX_VOCAB_SIZE = 1 << 22  # 4,194,304
 
 # Scientific stopwords (common terms that add noise)
 STOPWORDS = {
@@ -66,7 +82,7 @@ class BM25Vectorizer:
         b: float = 0.75,
         avg_doc_length: float = 500,
         min_term_freq: int = 1,
-        max_vocab_size: int = 50000,
+        max_vocab_size: int = DEFAULT_MAX_VOCAB_SIZE,
     ):
         """Initialize BM25 vectorizer.
 
@@ -88,6 +104,12 @@ class BM25Vectorizer:
         self._doc_count = 0
         # Store document frequencies for accurate incremental updates
         self._doc_freq: Dict[str, int] = {}
+        # Running total of tokens seen, used to monitor avg_doc_length drift.
+        # avg_doc_length is deliberately NOT recomputed on incremental updates: it is
+        # baked into every stored document vector, so changing it would silently
+        # invalidate the index. See _check_avg_doc_length_drift().
+        self._total_doc_length = 0
+        self._scheme_version = SPARSE_SCHEME_VERSION
 
     def tokenize(self, text: str) -> List[str]:
         """Tokenize text for BM25.
@@ -113,8 +135,16 @@ class BM25Vectorizer:
         return tokens
 
     def _term_to_index(self, term: str) -> int:
-        """Convert term to consistent index via hashing."""
-        return hash(term) % self.max_vocab_size
+        """Convert term to a consistent index via a process-stable hash.
+
+        Must NOT use the builtin hash(): Python salts string hashing per process
+        (PYTHONHASHSEED), so the same term mapped to a different sparse dimension in
+        every process. Document vectors written by the indexer were therefore
+        unreachable by query vectors built in the API process. blake2b is stable
+        across processes, machines and Python versions.
+        """
+        digest = hashlib.blake2b(term.encode("utf-8"), digest_size=8).digest()
+        return int.from_bytes(digest, "big") % self.max_vocab_size
 
     def _get_idf(self, term: str, default_idf: float = 3.0) -> float:
         """Get IDF for a term.
@@ -132,10 +162,12 @@ class BM25Vectorizer:
         """
         self._doc_freq = Counter()
         self._doc_count = len(documents)
+        self._total_doc_length = 0
 
         for doc in documents:
-            tokens = set(self.tokenize(doc))
-            for token in tokens:
+            tokens = self.tokenize(doc)
+            self._total_doc_length += len(tokens)
+            for token in set(tokens):
                 self._doc_freq[token] += 1
 
         # Calculate IDF from document frequencies
@@ -168,8 +200,9 @@ class BM25Vectorizer:
 
         doc_freq_delta: Dict[str, int] = Counter()
         for doc in new_documents:
-            tokens = set(self.tokenize(doc))
-            for token in tokens:
+            tokens = self.tokenize(doc)
+            self._total_doc_length += len(tokens)
+            for token in set(tokens):
                 doc_freq_delta[token] += 1
 
         # Update stored document frequencies with new counts
@@ -180,6 +213,31 @@ class BM25Vectorizer:
         self._recalculate_idf()
 
         logger.info(f"Incrementally updated IDF cache: +{new_doc_count} docs, {len(self._idf_cache)} terms total")
+        self._check_avg_doc_length_drift()
+
+    def _check_avg_doc_length_drift(self, tolerance: float = 0.2) -> Optional[float]:
+        """Warn if the corpus average document length has drifted from the frozen value.
+
+        avg_doc_length is part of the *document* side of the BM25 formula and is baked
+        into stored vectors, so it is held fixed rather than recomputed per upload.
+        Small drift is harmless; large drift means the index should be re-vectorized.
+
+        Returns:
+            The observed average document length, or None if unknown.
+        """
+        if not self._doc_count or not self._total_doc_length:
+            return None
+        observed = self._total_doc_length / self._doc_count
+        if self.avg_doc_length > 0:
+            drift = abs(observed - self.avg_doc_length) / self.avg_doc_length
+            if drift > tolerance:
+                logger.warning(
+                    "BM25 avg_doc_length drift %.0f%%: stored vectors were built with "
+                    "avg_doc_length=%.1f but the corpus now averages %.1f tokens. "
+                    "Consider re-vectorizing the sparse index.",
+                    drift * 100, self.avg_doc_length, observed,
+                )
+        return observed
 
     def save_idf_cache(self, path: Optional[Path] = None) -> None:
         """Save IDF cache and document frequencies to disk for persistence.
@@ -191,14 +249,24 @@ class BM25Vectorizer:
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
         cache_data = {
+            "scheme_version": self._scheme_version,
             "doc_count": self._doc_count,
             "idf_cache": self._idf_cache,
             "doc_freq": self._doc_freq,  # Store document frequencies for accurate incremental updates
             "avg_doc_length": self.avg_doc_length,
+            "total_doc_length": self._total_doc_length,
+            # Persisted so that every process maps terms into the same sparse
+            # dimension space the stored document vectors were built in.
+            "max_vocab_size": self.max_vocab_size,
+            "k1": self.k1,
+            "b": self.b,
         }
 
-        with open(save_path, "w") as f:
+        # Write atomically: a truncated cache file silently degrades every query.
+        tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
+        with open(tmp_path, "w") as f:
             json.dump(cache_data, f)
+        tmp_path.replace(save_path)
 
         logger.info(f"Saved IDF cache to {save_path}: {len(self._idf_cache)} terms, {self._doc_count} docs")
 
@@ -225,6 +293,24 @@ class BM25Vectorizer:
             self._idf_cache = cache_data.get("idf_cache", {})
             self._doc_freq = cache_data.get("doc_freq", {})
             self.avg_doc_length = cache_data.get("avg_doc_length", self.avg_doc_length)
+            self._total_doc_length = cache_data.get("total_doc_length", 0)
+            self.k1 = cache_data.get("k1", self.k1)
+            self.b = cache_data.get("b", self.b)
+
+            # The hash space must match the one the stored document vectors were built
+            # with, otherwise query terms land on dimensions no document occupies.
+            self._scheme_version = cache_data.get("scheme_version", 1)
+            if "max_vocab_size" in cache_data:
+                self.max_vocab_size = cache_data["max_vocab_size"]
+
+            if self._scheme_version != SPARSE_SCHEME_VERSION:
+                logger.warning(
+                    "BM25 IDF cache at %s was written under sparse scheme v%s but this "
+                    "code expects v%s. Stored document vectors are incompatible with "
+                    "query vectors until the sparse index is rebuilt "
+                    "(scripts/rebuild_bm25_index.py).",
+                    load_path, self._scheme_version, SPARSE_SCHEME_VERSION,
+                )
 
             # If doc_freq is missing (old cache format), we can still use idf_cache
             # but incremental updates will be less accurate until next full rebuild
@@ -244,6 +330,18 @@ class BM25Vectorizer:
         is_query: bool = False,
     ) -> SparseVector:
         """Generate sparse BM25 vector for text.
+
+        The BM25 score is split across the two sides of the dot product:
+
+            document dimension t:  tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl/avgdl))
+            query dimension t:     tf_q * idf(t)
+
+        so that <doc, query> reproduces the BM25 sum over shared terms. IDF lives
+        entirely on the query side; document vectors carry no corpus statistics beyond
+        avg_doc_length. That is what lets the IDF table be refreshed at any time -- after
+        every upload, forever -- without invalidating the 200k+ vectors already stored.
+        Baking IDF into documents (the previous behaviour) meant chunks indexed at
+        different times were scored against different corpus statistics.
 
         Args:
             text: Input text
@@ -268,18 +366,18 @@ class BM25Vectorizer:
                 continue
 
             idx = self._term_to_index(term)
-            idf = self._get_idf(term)
 
             if is_query:
-                # For queries, use simple TF*IDF with boost for emphasis
-                score = tf * idf * 2.0
+                # Query side carries the IDF weighting.
+                score = tf * self._get_idf(term)
             else:
-                # Standard BM25 formula for documents
+                # Document side carries only TF saturation + length normalization.
+                # No IDF here: corpus statistics must not be frozen into the index.
                 numerator = tf * (self.k1 + 1)
                 denominator = tf + self.k1 * (
                     1 - self.b + self.b * (doc_length / self.avg_doc_length)
                 )
-                score = idf * (numerator / denominator)
+                score = numerator / denominator
 
             if idx in scores:
                 scores[idx] = max(scores[idx], score)  # Keep highest

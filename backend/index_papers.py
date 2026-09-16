@@ -274,8 +274,12 @@ def index_single_paper(
         stats["chunks"] = len(chunks)
         stats["success"] = True
 
-        # Collect texts for BM25 IDF updates (use section and abstract chunks)
-        stats["texts"] = [c.text for c in chunks if c.chunk_type in [ChunkType.ABSTRACT, ChunkType.SECTION]]
+        # Collect texts for BM25 IDF updates.
+        # Must cover EVERY chunk that got a sparse vector, not just abstract/section:
+        # doc_freq and doc_count have to describe the same population the BM25 query
+        # vectors are scored against. Restricting this to abstract+section is what left
+        # the IDF table at doc_count=13,979 while 212,953 chunks were indexed.
+        stats["texts"] = [c.text for c in chunks]
 
         # Count by type
         type_counts = {}

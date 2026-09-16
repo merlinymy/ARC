@@ -123,9 +123,12 @@ class Dependencies:
                 enable_entity_extraction=True,
                 enable_citation_verification=True,  # Verify LLM citations
                 enable_conversation_memory=True,
+                enable_hybrid_search=settings.enable_hybrid_search,
                 pdf_service=self.pdf_service,  # Pass PDF service for full document support
             )
-            logger.info("Created QueryEngine")
+            logger.info(
+                f"Created QueryEngine (hybrid_search={settings.enable_hybrid_search})"
+            )
         return self._query_engine
 
     @property

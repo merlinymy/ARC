@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     enable_query_classification: bool = True
     enable_query_expansion: bool = True
 
+    # Retrieval Mode
+    enable_hybrid_search: bool = Field(
+        default=True,
+        description=(
+            "Fuse dense (Voyage) and sparse (BM25) retrieval with Qdrant's RRF. "
+            "Requires the sparse index to be built under the current scheme version; "
+            "see backend/scripts/rebuild_bm25_index.py."
+        ),
+    )
+
     # Phase 1 Settings
     validation_sample_size: int = 50
     test_queries_path: Path = Path("./data/test_queries.json")

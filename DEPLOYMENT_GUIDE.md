@@ -71,7 +71,16 @@ UPLOAD_DIR=./uploads
 # Qdrant (Docker will run on localhost)
 QDRANT_HOST=localhost
 QDRANT_PORT=6333
-QDRANT_COLLECTION_NAME=research_papers
+
+# Embedding profile — picks the model, the vector dimension AND the Qdrant
+# collection as one unit. Do NOT set QDRANT_COLLECTION_NAME, EMBEDDING_MODEL or
+# EMBEDDING_DIMENSION: they are now read-only properties of the profile, and a
+# leftover value that contradicts the profile is rejected at startup rather than
+# silently ignored. Scoring a new-model query vector against old-model document
+# vectors returns plausible garbage with no error, so the coupling is enforced.
+#   voyage-3-large    -> collection research_papers      (1024d, live)
+#   voyage-context-4  -> collection research_papers_ctx4 (1024d, contextualized)
+EMBEDDING_PROFILE=voyage-3-large
 
 # API Settings
 API_HOST=0.0.0.0

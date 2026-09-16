@@ -1,0 +1,1153 @@
+{
+  "version": "v1",
+  "built_at": "2026-09-16T02:47:11.531550+00:00",
+  "source": {
+    "db": "/Users/merlin/projects/ARC/backend/data/app.db",
+    "table": "messages",
+    "filter": "role='user'",
+    "total_user_messages": 122,
+    "total_conversations": 84,
+    "distinct_texts": 80
+  },
+  "composition": {
+    "n_queries": 50,
+    "by_kind": {
+      "synthesis": 11,
+      "factual": 13,
+      "library_filtered": 9,
+      "methods": 17
+    },
+    "n_dropped_distinct": 30
+  },
+  "dropped": {
+    "5": "library-metadata question (paper counts, top authors); answered by aggregation over the papers table, not by chunk retrieval - no chunk can be relevant",
+    "65": "byte-duplicate of id 1 with trailing whitespace",
+    "115": "conversational fragment, no retrievable intent ('here are some of my publications')",
+    "118": "context-bound fragment - 'these papers' refers to an attached selection",
+    "121": "near-duplicate of id 112, which is the better-formed version of the same request",
+    "127": "meta-question about the previous answer, not about the library",
+    "139": "subsumed by id 215, which asks the same stoichiometry question with the protocol framing",
+    "142": "context-bound fragment ('how about for tbtu')",
+    "148": "presentation writing task: 5.7k-char job posting pasted in, no library information need",
+    "151": "title brainstorming, no library information need",
+    "157": "slide-title wording, no library information need",
+    "160": "7.5k-char slide-deck editing task",
+    "163": "'test'",
+    "165": "4.6k-char TED-talk transcript pasted as a style model",
+    "167": "talk-agenda structuring, no library information need",
+    "171": "prose insertion request into an existing draft",
+    "173": "title brainstorming",
+    "175": "abstract editing, pasted draft",
+    "179": "meta-question about a previous answer's sourcing",
+    "183": "near-duplicate of id 181 (same Wei Min SRS review)",
+    "191": "formula-definition request whose body is mangled unicode math; the query text itself is corrupted, so it is not a fair retrieval probe",
+    "223": "rewrite of an already-generated protocol - a generation task over prior output",
+    "225": "edit instruction on a previously generated protocol",
+    "227": "context-bound fragment ('what does the water do here')",
+    "235": "rewrite of an already-generated protocol",
+    "237": "leading edit instruction makes it context-bound",
+    "241": "edit instruction on a previously generated protocol",
+    "243": "context-bound fragment ('summarize these papers')",
+    "255": "context-bound follow-up ('go one by one on each project')",
+    "275": "conversational fragment ('yes please elaborate ...')"
+  },
+  "queries": [
+    {
+      "query_id": "q01",
+      "text": "I Want to understand how LXXLL motif was found and the history of SRC 2 peptide inhibitor.",
+      "kind": "synthesis",
+      "terms": [
+        [
+          "LXXLL",
+          "LxxLL"
+        ],
+        [
+          "SRC-2",
+          "SRC2",
+          "SRC 2",
+          "NCOA2",
+          "steroid receptor coactivator"
+        ]
+      ],
+      "source_message_id": 1,
+      "source_conversation_id": "a9834ab1-e428-4f8e-9378-bcd59e6b5caf",
+      "occurrences": 18,
+      "conversations": 17
+    },
+    {
+      "query_id": "q02",
+      "text": "please give me more detailed information about SRC2 peptide inhibitors such as which group found it and when and what has been done to improve it and are there other SRC numbers like SRC 3, SRC 4, etc?",
+      "kind": "synthesis",
+      "terms": [
+        [
+          "SRC2",
+          "SRC-2",
+          "SRC 2"
+        ],
+        [
+          "SRC3",
+          "SRC-3",
+          "SRC 3",
+          "NCOA3"
+        ],
+        [
+          "coactivator"
+        ]
+      ],
+      "source_message_id": 3,
+      "source_conversation_id": "a9834ab1-e428-4f8e-9378-bcd59e6b5caf",
+      "occurrences": 23,
+      "conversations": 21
+    },
+    {
+      "query_id": "q03",
+      "text": "tell me the most potent SRC peptide inhibitor ",
+      "kind": "factual",
+      "terms": [
+        [
+          "SRC2",
+          "SRC-2",
+          "SRC 2",
+          "SRC"
+        ]
+      ],
+      "source_message_id": 9,
+      "source_conversation_id": "a9834ab1-e428-4f8e-9378-bcd59e6b5caf",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q04",
+      "text": "Please give me the potency of SRC inhibitors from all the papers in my library",
+      "kind": "factual",
+      "terms": [
+        [
+          "SRC2",
+          "SRC-2",
+          "SRC 2",
+          "SRC"
+        ],
+        [
+          "potency",
+          "potent",
+          "IC50",
+          "Ki",
+          "Kd"
+        ]
+      ],
+      "source_message_id": 11,
+      "source_conversation_id": "a9834ab1-e428-4f8e-9378-bcd59e6b5caf",
+      "occurrences": 3,
+      "conversations": 2
+    },
+    {
+      "query_id": "q05",
+      "text": "I am giving an academic job talk. search the data base for the papers with me A'Lester C Allen as the author. propose a few ways to frame my grad school research in SERS for a assistant professor in medicinal chemistry position. ",
+      "kind": "library_filtered",
+      "terms": [
+        [
+          "A'Lester",
+          "ALester",
+          "Allen"
+        ],
+        [
+          "SERS",
+          "surface-enhanced Raman",
+          "surface enhanced Raman"
+        ]
+      ],
+      "source_message_id": 112,
+      "source_conversation_id": "987a9797-12a4-4b58-8416-cfcf6daefd7d",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q06",
+      "text": "can you tell me where apidaecin is fitc tagged",
+      "kind": "factual",
+      "terms": [
+        [
+          "apidaecin"
+        ],
+        [
+          "FITC",
+          "fluorescein isothiocyanate",
+          "fluorescein-5-isothiocyanate"
+        ]
+      ],
+      "source_message_id": 124,
+      "source_conversation_id": "82fb1d85-8c80-47af-b1ef-80d2f3db84e6",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q07",
+      "text": "tell me how to efficiently and with the highest yield on tetramethyl guanidinylate the N terminus of my peptide",
+      "kind": "methods",
+      "terms": [
+        [
+          "tetramethylguanidin",
+          "tetramethyl guanidin",
+          "guanidinylat",
+          "TMG"
+        ],
+        [
+          "N-terminus",
+          "N terminus",
+          "N-terminal",
+          "N terminal"
+        ]
+      ],
+      "source_message_id": 130,
+      "source_conversation_id": "559adaae-1cdd-4c71-8f7b-c36567c362cf",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q08",
+      "text": "tell me how to effectively do a global cleavage on apidaecin 137",
+      "kind": "methods",
+      "terms": [
+        [
+          "apidaecin"
+        ],
+        [
+          "Api137",
+          "Api 137",
+          "Api-137",
+          "apidaecin 137"
+        ],
+        [
+          "global cleavage",
+          "cleavage cocktail",
+          "TFA cleavage"
+        ]
+      ],
+      "source_message_id": 133,
+      "source_conversation_id": "559adaae-1cdd-4c71-8f7b-c36567c362cf",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q09",
+      "text": "what happens if you perform Fluorescent Labeling after global deprotection considering the only free admins of apidaecin 137 is ornithine",
+      "kind": "methods",
+      "terms": [
+        [
+          "apidaecin"
+        ],
+        [
+          "ornithine",
+          "Orn"
+        ],
+        [
+          "global deprotection",
+          "side-chain deprotection",
+          "deprotection"
+        ]
+      ],
+      "source_message_id": 136,
+      "source_conversation_id": "559adaae-1cdd-4c71-8f7b-c36567c362cf",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q10",
+      "text": "what is the optimal time for peptide cleavage\n",
+      "kind": "methods",
+      "terms": [
+        [
+          "peptide cleavage",
+          "cleavage time",
+          "cleavage cocktail"
+        ]
+      ],
+      "source_message_id": 145,
+      "source_conversation_id": "1f86b7bf-6b54-4900-b72a-654739abace9",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q11",
+      "text": "give me the first 4 intro slides based on recently uploaded peptide therapeutics reviews that highlight the growth and challenges of peptide therapeutics",
+      "kind": "synthesis",
+      "terms": [
+        [
+          "peptide therapeutic",
+          "therapeutic peptide"
+        ]
+      ],
+      "source_message_id": 154,
+      "source_conversation_id": "89d8263a-e8b7-426a-8364-e87c20eebae1",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q12",
+      "text": "concisely answer this with regards to finding peptide inhibitors to therapy resistant estrogen receptor based breast cancer: Would you also send the information of protein to him with the significance of protein and its function, why you want to do etc?\n\n\n\nKilian does not know what it is, so that you need to describe above.",
+      "kind": "synthesis",
+      "terms": [
+        [
+          "estrogen receptor",
+          "oestrogen receptor",
+          "ERalpha",
+          "ER-alpha",
+          "ESR1",
+          "ERα"
+        ],
+        [
+          "breast cancer"
+        ],
+        [
+          "peptide inhibitor"
+        ]
+      ],
+      "source_message_id": 169,
+      "source_conversation_id": "d20e837b-4c35-43eb-8d78-aa5243e013a3",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q13",
+      "text": "this is a quote from a paper \"imaging the uptake of drug carriers presents a significant challenge using conventional Raman microscopy, since these frequently accumulate at much lower intracellular concentrations.\"\nWhat are the cellular concentrations that some drugs and peptide accumulate and what is the limit of detection using SRS",
+      "kind": "factual",
+      "terms": [
+        [
+          "intracellular concentration",
+          "cellular concentration",
+          "intracellular accumulation"
+        ],
+        [
+          "limit of detection",
+          "detection limit",
+          "LOD"
+        ],
+        [
+          "SRS",
+          "stimulated Raman"
+        ]
+      ],
+      "source_message_id": 177,
+      "source_conversation_id": "e01d0bac-3af0-4355-b9b6-a09ad38d3527",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q14",
+      "text": "please give an indepth summary of Wei Min's review article: Theory, innovations and applications of stimulated Raman scattering microscopy",
+      "kind": "library_filtered",
+      "terms": [
+        [
+          "Wei Min",
+          "Min W"
+        ],
+        [
+          "stimulated Raman scattering",
+          "SRS"
+        ]
+      ],
+      "source_message_id": 181,
+      "source_conversation_id": "e01d0bac-3af0-4355-b9b6-a09ad38d3527",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q15",
+      "text": "are you able to identify this paper in the library? \nReview article https://doi.org/10.1038/s41566-025-01707-z\nTheory, innovations and applications of\nstimulated Raman scattering microscopy\nWei Min  1 , Ji-Xin Cheng  2 & Yasuyuki Ozeki  3",
+      "kind": "library_filtered",
+      "terms": [
+        [
+          "10.1038/s41566-025-01707-z"
+        ],
+        [
+          "stimulated Raman scattering",
+          "SRS"
+        ],
+        [
+          "Wei Min",
+          "Ji-Xin Cheng",
+          "Ozeki"
+        ]
+      ],
+      "source_message_id": 185,
+      "source_conversation_id": "fbe3893f-ec1f-489d-acaa-193dffb3211b",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q16",
+      "text": "what is the mic of apidaecin analogs including api 137",
+      "kind": "factual",
+      "terms": [
+        [
+          "MIC",
+          "minimum inhibitory concentration",
+          "minimal inhibitory concentration"
+        ],
+        [
+          "apidaecin"
+        ],
+        [
+          "Api137",
+          "Api 137",
+          "Api-137"
+        ]
+      ],
+      "source_message_id": 187,
+      "source_conversation_id": "6487bf6a-a3c0-4ee4-a38a-65c321f853a2",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q17",
+      "text": "tell me the link between LSPR and optical properties of hollow nanoparticles and how this relates to more sensitive SERS detection",
+      "kind": "factual",
+      "terms": [
+        [
+          "LSPR",
+          "localized surface plasmon",
+          "localised surface plasmon"
+        ],
+        [
+          "hollow nanoparticle",
+          "hollow gold",
+          "nanoshell"
+        ],
+        [
+          "SERS"
+        ]
+      ],
+      "source_message_id": 189,
+      "source_conversation_id": "a9799920-717e-4097-ae6c-22401ad5ec2c",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q18",
+      "text": "give me a problem statement for why plasmonic SERS detection is useful for SARS-CoV-2",
+      "kind": "synthesis",
+      "terms": [
+        [
+          "plasmonic"
+        ],
+        [
+          "SERS"
+        ],
+        [
+          "SARS-CoV-2",
+          "SARS CoV 2",
+          "COVID-19",
+          "coronavirus"
+        ]
+      ],
+      "source_message_id": 193,
+      "source_conversation_id": "bbd5afb3-5d05-4fae-8604-78988376c4f6",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q19",
+      "text": "who discovered SRC2-SP4 and R4K1",
+      "kind": "factual",
+      "terms": [
+        [
+          "SRC2-SP4",
+          "SRC2 SP4",
+          "SP4"
+        ],
+        [
+          "R4K1"
+        ]
+      ],
+      "source_message_id": 195,
+      "source_conversation_id": "7649e2a4-d072-4625-8627-013556a8d13d",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q20",
+      "text": "can you help me identify a new target in the nuclear receptor family to identify an LXXLL like motif? ",
+      "kind": "synthesis",
+      "terms": [
+        [
+          "nuclear receptor"
+        ],
+        [
+          "LXXLL",
+          "LxxLL"
+        ]
+      ],
+      "source_message_id": 197,
+      "source_conversation_id": "2ee0cc2d-dda9-42ba-8dd2-194678678210",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q21",
+      "text": "please summarize the medchem review articles from acs medi that I recently uploaded",
+      "kind": "library_filtered",
+      "terms": [
+        [
+          "medicinal chemistry",
+          "med chem",
+          "J. Med. Chem",
+          "ACS Med"
+        ]
+      ],
+      "source_message_id": 199,
+      "source_conversation_id": "20b0f571-69d7-4bbb-910c-afb9380e1f79",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q22",
+      "text": "can you summarize all emerging target classes and modalities",
+      "kind": "synthesis",
+      "terms": [
+        [
+          "target class"
+        ],
+        [
+          "modality",
+          "modalities"
+        ]
+      ],
+      "source_message_id": 201,
+      "source_conversation_id": "20b0f571-69d7-4bbb-910c-afb9380e1f79",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q23",
+      "text": "list the major labs in peptide therapy research ",
+      "kind": "synthesis",
+      "terms": [
+        [
+          "peptide therap"
+        ]
+      ],
+      "source_message_id": 203,
+      "source_conversation_id": "ad0c91ab-bd91-4402-96bc-125392abcf99",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q24",
+      "text": "why do you suggest: Alanna Schepartz Lab (UC Berkeley)  and what are key findings from her lab?",
+      "kind": "library_filtered",
+      "terms": [
+        [
+          "Schepartz"
+        ]
+      ],
+      "source_message_id": 205,
+      "source_conversation_id": "ad0c91ab-bd91-4402-96bc-125392abcf99",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q25",
+      "text": "I want to come up with a beta peptide project to propose to Alanna. I'm thinking replacing the lxxll motif with a beta peptide. Could you search for sequences and structures that would work ",
+      "kind": "synthesis",
+      "terms": [
+        [
+          "beta peptide",
+          "beta-peptide",
+          "β-peptide",
+          "β peptide"
+        ],
+        [
+          "LXXLL",
+          "LxxLL"
+        ]
+      ],
+      "source_message_id": 207,
+      "source_conversation_id": "ad0c91ab-bd91-4402-96bc-125392abcf99",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q26",
+      "text": "What are the ways to connect peptide side chains? I'm aware of hydrocarbon staples, salt bridges kind of make sense ",
+      "kind": "methods",
+      "terms": [
+        [
+          "hydrocarbon staple",
+          "stapled peptide",
+          "stapling"
+        ],
+        [
+          "salt bridge"
+        ],
+        [
+          "side chain",
+          "side-chain"
+        ]
+      ],
+      "source_message_id": 209,
+      "source_conversation_id": "ad0c91ab-bd91-4402-96bc-125392abcf99",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q27",
+      "text": "What concentrations can be detected with Stimulated Raman Scattering and answer the same question but for drugs",
+      "kind": "factual",
+      "terms": [
+        [
+          "stimulated Raman scattering",
+          "SRS"
+        ],
+        [
+          "concentration"
+        ]
+      ],
+      "source_message_id": 211,
+      "source_conversation_id": "3f354ce0-a602-4dd1-bbdd-88a0ca75834b",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q28",
+      "text": "please analyze papers on skin analysis using SRS especially those authored by Conor Evan and report the detection limits ",
+      "kind": "library_filtered",
+      "terms": [
+        [
+          "SRS",
+          "stimulated Raman"
+        ],
+        [
+          "Conor Evans",
+          "Evans"
+        ],
+        [
+          "skin"
+        ],
+        [
+          "detection limit",
+          "limit of detection"
+        ]
+      ],
+      "source_message_id": 213,
+      "source_conversation_id": "7ecf46ef-1985-4212-8f02-ec20d9945c5c",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q29",
+      "text": "what's the protocol for adding nntetramethylguanidine to the nterminal of a peptide? give me a recipe for a 0.1mmol reaction",
+      "kind": "methods",
+      "terms": [
+        [
+          "tetramethylguanidin",
+          "tetramethyl guanidin",
+          "guanidinylat",
+          "TMG"
+        ]
+      ],
+      "source_message_id": 215,
+      "source_conversation_id": "12fdfafe-fd14-41f5-a0bf-2054e1ba7fe2",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q30",
+      "text": "any protocols for in solution glaser coupling on a peptide off resin?",
+      "kind": "methods",
+      "terms": [
+        [
+          "Glaser coupling",
+          "Glaser-Hay",
+          "Glaser hay",
+          "Glaser"
+        ],
+        [
+          "off-resin",
+          "off resin",
+          "in solution",
+          "solution-phase"
+        ]
+      ],
+      "source_message_id": 217,
+      "source_conversation_id": "12fdfafe-fd14-41f5-a0bf-2054e1ba7fe2",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q31",
+      "text": "I am trying to make the apidaecin analogs belwo where pra is propargyl glycine and gu is NNNNtetramethylguanidino group on the Nterminus.\nY7Pra: guONNRPVPraIPRPRPPHPRL, exact mass 2223.32\nP11Pra: guONNRPVYIPRPraRPPHPRL exact mass 2289.33\nP9Pra: guONNRPVYIPraRPRPPHPRL exact mass 2289.33\nL18Pra: guONNRPVYIPRPRPPHPRPra exact mass2273.3\n\nThe masses observed via MALDI TOF for each are below. help me make a plan to troubleshoot what is going wrong. Start by extracting how these mutation points can cause issues, then extract CEM Liberty microwave assisted SPPS protocols, gu protocols, \nY7Pra: 2156.62, 2288.81, 1926.49, 2198.65, 2359.87, 1996.57, 2063.68, 2125.66, 2178.67, 2218.72, 2416.95 \nP9Pra:did not ionize \nP11Pra: 1093.77, 2061.31, 2133.42\nL18Pra: 902.6, 974.71, 890.62, 1778.16, 1925.38, 2024.49",
+      "kind": "methods",
+      "terms": [
+        [
+          "apidaecin"
+        ],
+        [
+          "propargyl glycine",
+          "propargylglycine",
+          "Pra"
+        ],
+        [
+          "tetramethylguanidino",
+          "guanidino",
+          "guanidinylat"
+        ],
+        [
+          "MALDI",
+          "MALDI-TOF"
+        ]
+      ],
+      "source_message_id": 219,
+      "source_conversation_id": "20b04215-2092-4843-bb51-c6ae124a8992",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q32",
+      "text": "search the literature and suggest a protocol for in solution glaser coupling using CuCl, BiPy, for AcHKIPrSHRPrSLQDS-NH2\nwhere PrS is propargyl serine",
+      "kind": "methods",
+      "terms": [
+        [
+          "Glaser coupling",
+          "Glaser-Hay",
+          "Glaser"
+        ],
+        [
+          "CuCl",
+          "copper(I) chloride",
+          "cuprous chloride"
+        ],
+        [
+          "bipyridine",
+          "bipy",
+          "2,2'-bipyridine"
+        ],
+        [
+          "propargyl serine",
+          "propargylserine"
+        ]
+      ],
+      "source_message_id": 221,
+      "source_conversation_id": "ab5a8b28-6a1d-4a05-962a-b3e3c489e830",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q33",
+      "text": "please suggest alternatives for using diisopropylcarbodiide for microwave assisted oxyma DIC SPPS",
+      "kind": "methods",
+      "terms": [
+        [
+          "diisopropylcarbodiimide",
+          "DIC",
+          "DIPCDI"
+        ],
+        [
+          "Oxyma"
+        ],
+        [
+          "SPPS",
+          "solid-phase peptide synthesis",
+          "solid phase peptide synthesis"
+        ],
+        [
+          "microwave"
+        ]
+      ],
+      "source_message_id": 229,
+      "source_conversation_id": "dcc2ef89-c8bf-4864-b02c-533d925e1f45",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q34",
+      "text": "look at Su-2016-Copper Catalysis for Selective Hetero paper and tell me the protocol for using TMEDA, CuCl and adapt it to a peptide",
+      "kind": "library_filtered",
+      "terms": [
+        [
+          "TMEDA",
+          "tetramethylethylenediamine",
+          "N,N,N',N'-tetramethylethylenediamine"
+        ],
+        [
+          "CuCl",
+          "copper(I) chloride"
+        ],
+        [
+          "copper catalysis",
+          "Cu catalysis",
+          "copper-catalyzed",
+          "copper-catalysed"
+        ]
+      ],
+      "source_message_id": 231,
+      "source_conversation_id": "c1ae6c3f-68ab-4f06-ba60-047dfa70fc46",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q35",
+      "text": "search papers and find a protocol for intramolecular glaser coupling using cucl and tmeda in dcm",
+      "kind": "methods",
+      "terms": [
+        [
+          "Glaser coupling",
+          "Glaser-Hay",
+          "Glaser"
+        ],
+        [
+          "CuCl",
+          "copper(I) chloride"
+        ],
+        [
+          "TMEDA",
+          "tetramethylethylenediamine"
+        ],
+        [
+          "DCM",
+          "dichloromethane"
+        ]
+      ],
+      "source_message_id": 233,
+      "source_conversation_id": "491e66c9-26a8-41bb-bb38-7616e9fbf727",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q36",
+      "text": "can you use a 2 chlorotrityl chloride resin to put an amide on the N terminus? to form an acid labile resin similar to Sieber amide resin",
+      "kind": "methods",
+      "terms": [
+        [
+          "2-chlorotrityl",
+          "chlorotrityl",
+          "2-CTC",
+          "CTC resin"
+        ],
+        [
+          "Sieber",
+          "Sieber amide"
+        ],
+        [
+          "acid labile",
+          "acid-labile"
+        ]
+      ],
+      "source_message_id": 239,
+      "source_conversation_id": "6be3c0a4-5a6f-46aa-b94e-0f26b928af1f",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q37",
+      "text": "what are some common antimicrobial peptides targeting gram positive bacteria",
+      "kind": "factual",
+      "terms": [
+        [
+          "antimicrobial peptide",
+          "AMP"
+        ],
+        [
+          "Gram-positive",
+          "gram positive",
+          "Gram +"
+        ]
+      ],
+      "source_message_id": 245,
+      "source_conversation_id": "0bbe6715-675a-4771-8565-93e89a1ddc01",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q38",
+      "text": "in what cases can e.coli infect human, pig, or mouse skin?",
+      "kind": "factual",
+      "terms": [
+        [
+          "E. coli",
+          "E.coli",
+          "Escherichia coli"
+        ],
+        [
+          "skin"
+        ]
+      ],
+      "source_message_id": 247,
+      "source_conversation_id": "9f433c54-6731-4df4-85d4-8b7c6ede9019",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q39",
+      "text": "what is the protocol for infecting skin with e.coli? ",
+      "kind": "methods",
+      "terms": [
+        [
+          "E. coli",
+          "E.coli",
+          "Escherichia coli"
+        ],
+        [
+          "skin infection",
+          "skin"
+        ]
+      ],
+      "source_message_id": 249,
+      "source_conversation_id": "8eb843cf-73ef-4327-8701-87a09efbdb58",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q40",
+      "text": "i want to get a quote for  the plasmid prep and expression of estrogen receptor LBD WT, D538G, and Y537S mutants. Genscript asked me for : expression system, scale, application. Please give me the answers based on relevant papers ",
+      "kind": "methods",
+      "terms": [
+        [
+          "estrogen receptor",
+          "ERα",
+          "ERalpha",
+          "ESR1"
+        ],
+        [
+          "LBD",
+          "ligand binding domain",
+          "ligand-binding domain"
+        ],
+        [
+          "D538G"
+        ],
+        [
+          "Y537S"
+        ],
+        [
+          "plasmid",
+          "expression system",
+          "E. coli expression",
+          "baculovirus"
+        ]
+      ],
+      "source_message_id": 251,
+      "source_conversation_id": "1e27486e-1779-437a-afb8-618a867f34cf",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q41",
+      "text": "I want to convert a few ideas into research papers. I want to keep a running tab on my paper ideas, start gathering citations for the introduction, brainstorm impact and target journals, and come up with other ideas to make sure these ideas lead to papers\n1. azide tagged antimicrobial peptide for pharmacokinetic in cell bacterial studies using Mid-infrared Photothermal Modulated Fluorescence.\n2. alkyne tagged peptides on Stimulated Raman Photothermal microscopy \n3. antimicrobial peptides in cyanobacteria\n4. ERalpha LBD mRNA display screen \n5. Glaser stapled SRC2 inhibitors with SRS imaging\n6. BADY on peptide for SRS imaging\n7. finding antimicrobial peptides targeting bacteria on human skin and doing an SRS imaging study in Conor Evans lab\n8. Company funding study on peptides used in the beauty industry for health of human facial skin",
+      "kind": "synthesis",
+      "terms": [
+        [
+          "azide",
+          "azido"
+        ],
+        [
+          "antimicrobial peptide",
+          "AMP"
+        ],
+        [
+          "mRNA display"
+        ],
+        [
+          "BADY"
+        ],
+        [
+          "photothermal"
+        ]
+      ],
+      "source_message_id": 253,
+      "source_conversation_id": "1561732c-538a-4c94-ae10-1fb92ccc2ec3",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q42",
+      "text": "I want to attempt a reaction of fmoc l propargyl glycine with phenylacetylene to get 2-((((9H-fluoren-9-yl)methoxy)carbonyl)amino)-7-phenylhepta-4,6-diynoic acid.\ntell me 1. the reaction conditions\n2. whether the product is patentable\n3. other conditions to try",
+      "kind": "methods",
+      "terms": [
+        [
+          "propargyl glycine",
+          "propargylglycine",
+          "Fmoc-Pra"
+        ],
+        [
+          "phenylacetylene"
+        ],
+        [
+          "diynoic acid",
+          "hepta-4,6-diynoic",
+          "diyne"
+        ]
+      ],
+      "source_message_id": 257,
+      "source_conversation_id": "29b8281f-90f8-4690-a938-764404d71602",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q43",
+      "text": "would a diyne be IR active",
+      "kind": "factual",
+      "terms": [
+        [
+          "diyne",
+          "diynyl",
+          "butadiyne"
+        ],
+        [
+          "IR active",
+          "infrared",
+          "IR-active"
+        ]
+      ],
+      "source_message_id": 259,
+      "source_conversation_id": "2ac940b8-47c7-4f10-b00e-dadcdfd1fdbb",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q44",
+      "text": "what are other high raman cross-section groups that I can use to put on peptides for imaging",
+      "kind": "factual",
+      "terms": [
+        [
+          "Raman cross-section",
+          "Raman cross section",
+          "cross-section"
+        ],
+        [
+          "alkyne",
+          "nitrile",
+          "deuterium"
+        ]
+      ],
+      "source_message_id": 261,
+      "source_conversation_id": "dbaf934a-1a2e-46a7-a3a1-a9fc501b2645",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q45",
+      "text": "I want to perform reactions to make Fmoc L PhDY glycine (2-((((9H-fluoren-9-yl)methoxy)carbonyl)amino)-7-phenylhepta-4,6-diynoic acid), Fmoc L BADY phenylalanine (2-((((9H-fluoren-9-yl)methoxy)carbonyl)amino)-3-(4-(phenylbuta-1,3-diyn-1-yl)phenyl)propanoic acid), and N-(((9H-fluoren-9-yl)methoxy)carbonyl)-O-(5-phenylpenta-2,4-diyn-1-yl)serine. Please give the best reaction condition for the best yield and easy workup.",
+      "kind": "methods",
+      "terms": [
+        [
+          "PhDY",
+          "phenyl-diyne",
+          "phenylhepta-4,6-diynoic"
+        ],
+        [
+          "BADY",
+          "phenylbuta-1,3-diyn"
+        ],
+        [
+          "Fmoc"
+        ]
+      ],
+      "source_message_id": 263,
+      "source_conversation_id": "00afe097-8cb6-431c-9657-8c79a6ad7fe4",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q46",
+      "text": "give me details using triethylamine as the base and has the highest yield using Pd(PPh₃)₂Cl₂",
+      "kind": "methods",
+      "terms": [
+        [
+          "triethylamine",
+          "Et3N",
+          "TEA",
+          "NEt3"
+        ],
+        [
+          "Pd(PPh3)2Cl2",
+          "PdCl2(PPh3)2",
+          "bis(triphenylphosphine)palladium",
+          "Pd(PPh₃)₂Cl₂"
+        ]
+      ],
+      "source_message_id": 265,
+      "source_conversation_id": "00afe097-8cb6-431c-9657-8c79a6ad7fe4",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q47",
+      "text": "can you tell me how then concentration of apidaecin that accumulates inside cells",
+      "kind": "factual",
+      "terms": [
+        [
+          "apidaecin"
+        ],
+        [
+          "intracellular",
+          "inside cells",
+          "accumulat"
+        ],
+        [
+          "concentration"
+        ]
+      ],
+      "source_message_id": 267,
+      "source_conversation_id": "0efff62c-6eea-4b51-ba52-15db05df9a45",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q48",
+      "text": "find the papers that mention intracellular concentration of peptides",
+      "kind": "library_filtered",
+      "terms": [
+        [
+          "intracellular concentration",
+          "intracellular accumulation"
+        ],
+        [
+          "peptide"
+        ]
+      ],
+      "source_message_id": 269,
+      "source_conversation_id": "1bc17e35-f38e-4c3f-8584-d051e522cde5",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q49",
+      "text": "do any of my alkyne coupling (glaser, glaser-hay, cadiot chodkiewicz) papers use Tetrakis(triphenylphosphine)palladium(0)?",
+      "kind": "library_filtered",
+      "terms": [
+        [
+          "Glaser"
+        ],
+        [
+          "Glaser-Hay",
+          "Glaser Hay"
+        ],
+        [
+          "Cadiot-Chodkiewicz",
+          "Cadiot Chodkiewicz",
+          "Chodkiewicz"
+        ],
+        [
+          "Tetrakis(triphenylphosphine)palladium",
+          "Pd(PPh3)4",
+          "Pd(PPh₃)₄",
+          "tetrakis"
+        ]
+      ],
+      "source_message_id": 271,
+      "source_conversation_id": "c2294531-57d8-4c90-bf25-6d7c932ede1c",
+      "occurrences": 1,
+      "conversations": 1
+    },
+    {
+      "query_id": "q50",
+      "text": "based on my library and what you know about me, what would be 3 research focii for my independent research lab",
+      "kind": "synthesis",
+      "terms": [],
+      "source_message_id": 273,
+      "source_conversation_id": "8f035a05-aa65-4bbc-8f38-7932ff7f0ef4",
+      "occurrences": 1,
+      "conversations": 1
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+ "n_resampled": 180,
+ "exact_agreement": 0.928,
+ "within_one_grade": 0.994,
+ "binary_agreement_rel_vs_not": 0.956,
+ "linear_weighted_kappa": 0.906,
+ "probe_spend_usd": 0.2494
+}

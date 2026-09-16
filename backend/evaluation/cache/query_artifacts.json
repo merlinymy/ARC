@@ -1,0 +1,551 @@
+{
+ "q49": {
+  "rewritten": "do any of my alkyne coupling (glaser, glaser-hay, cadiot chodkiewicz) papers use Tetrakis(triphenylphosphine)palladium(0)?",
+  "expanded": "do any of my alkyne coupling (glaser, glaser-hay, cadiot chodkiewicz) papers use Tetrakis(triphenylphosphine)palladium(0)? (related terms: diyne, diyne tag)",
+  "expansion_terms": [
+   "diyne",
+   "diyne tag"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.75,
+  "classifier_reasoning": "Asks whether a specific reagent appears across multiple papers, requiring lookup across corpus for a factual presence/absence answer.",
+  "keyword_type": "general"
+ },
+ "q35": {
+  "rewritten": "search papers and find a protocol for intramolecular glaser coupling using cucl and tmeda in dcm",
+  "expanded": "search papers and find a protocol for intramolecular glaser coupling using cucl and tmeda in dcm",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.85,
+  "classifier_reasoning": "The query asks for a specific experimental protocol involving reagents and solvent conditions, which is a technical procedure question, requiring search across papers for matching methods.",
+  "keyword_type": "methods"
+ },
+ "q01": {
+  "rewritten": "I Want to understand how LXXLL motif was found and the history of SRC 2 peptide inhibitor.",
+  "expanded": "I Want to understand how LXXLL motif was found and the history of SRC 2 peptide inhibitor. (related terms: coactivator binding, coactivator recruitment)",
+  "expansion_terms": [
+   "coactivator binding",
+   "coactivator recruitment"
+  ],
+  "classifier_type": "novelty",
+  "classifier_confidence": 0.6,
+  "classifier_reasoning": "Query asks about the history and discovery of the LXXLL motif and SRC-2 peptide inhibitor, which involves assessing prior work and how it was found, aligning with novelty/background assessment rather than a single fact.",
+  "keyword_type": "general"
+ },
+ "q02": {
+  "rewritten": "please give me more detailed information about SRC2 peptide inhibitors such as which group found it and when and what has been done to improve it and are there other SRC numbers like SRC 3, SRC 4, etc?",
+  "expanded": "please give me more detailed information about SRC2 peptide inhibitors such as which group found it and when and what has been done to improve it and are there other SRC numbers like SRC 3, SRC 4, etc? (related terms: coactivator binding, coactivator recruitment)",
+  "expansion_terms": [
+   "coactivator binding",
+   "coactivator recruitment"
+  ],
+  "classifier_type": "novelty",
+  "classifier_confidence": 0.6,
+  "classifier_reasoning": "Asks about origin, history, improvements, and existence of related variants (SRC3, SRC4), which involves assessing prior work and what has been developed, fitting novelty/prior-art assessment rather than a single fact.",
+  "keyword_type": "general"
+ },
+ "q03": {
+  "rewritten": "tell me the most potent SRC peptide inhibitor ",
+  "expanded": "tell me the most potent SRC peptide inhibitor  (related terms: coactivator binding, coactivator recruitment)",
+  "expansion_terms": [
+   "coactivator binding",
+   "coactivator recruitment"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.75,
+  "classifier_reasoning": "Asks for a specific fact (identity of most potent inhibitor), which is objective and verifiable rather than assessing novelty or positioning.",
+  "keyword_type": "general"
+ },
+ "q04": {
+  "rewritten": "Please give me the potency of SRC inhibitors from all the papers in my library",
+  "expanded": "Please give me the potency of SRC inhibitors from all the papers in my library (related terms: coactivator binding, coactivator recruitment)",
+  "expansion_terms": [
+   "coactivator binding",
+   "coactivator recruitment"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.8,
+  "classifier_reasoning": "Requests specific potency values (objective, verifiable data) aggregated across multiple papers in the library, making it cross-corpus factual retrieval rather than novelty or comparative analysis.",
+  "keyword_type": "general"
+ },
+ "q05": {
+  "rewritten": "I am giving an academic job talk. search the data base for the papers with me A'Lester C Allen as the author. propose a few ways to frame my grad school research in SERS for a assistant professor in medicinal chemistry position. ",
+  "expanded": "I am giving an academic job talk. search the data base for the papers with me A'Lester C Allen as the author. propose a few ways to frame my grad school research in SERS for a assistant professor in medicinal chemistry position.  (related terms: minimum inhibitory concentration, minimal inhibitory concentration)",
+  "expansion_terms": [
+   "minimum inhibitory concentration",
+   "minimal inhibitory concentration"
+  ],
+  "classifier_type": "framing",
+  "classifier_confidence": 0.85,
+  "classifier_reasoning": "The query asks for rhetorical positioning/framing strategies for presenting research in a job talk context, requiring synthesis across multiple papers by the author to identify a compelling narrative for a medicinal chemistry faculty position.",
+  "keyword_type": "general"
+ },
+ "q06": {
+  "rewritten": "can you tell me where apidaecin is fitc tagged",
+  "expanded": "can you tell me where apidaecin is fitc tagged (related terms: fluorescein, fluorescein isothiocyanate, fluorescent label)",
+  "expansion_terms": [
+   "fluorescein",
+   "fluorescein isothiocyanate",
+   "fluorescent label"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.75,
+  "classifier_reasoning": "Asks for a specific fact about where FITC tagging occurs on apidaecin, which is objective and verifiable, not assessing novelty or methods broadly.",
+  "keyword_type": "general"
+ },
+ "q07": {
+  "rewritten": "tell me how to efficiently and with the highest yield on tetramethyl guanidinylate the N terminus of my peptide",
+  "expanded": "tell me how to efficiently and with the highest yield on tetramethyl guanidinylate the N terminus of my peptide",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.9,
+  "classifier_reasoning": "Asks for a specific technical protocol/procedure to achieve high-yield N-terminal guanidinylation, which is a methods question about how something is done.",
+  "keyword_type": "general"
+ },
+ "q08": {
+  "rewritten": "tell me how to effectively do a global cleavage on apidaecin 137",
+  "expanded": "tell me how to effectively do a global cleavage on apidaecin 137",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.85,
+  "classifier_reasoning": "Query asks about a technical protocol (global cleavage procedure) for a specific peptide, which is a methods/procedural question.",
+  "keyword_type": "general"
+ },
+ "q09": {
+  "rewritten": "what happens if you perform Fluorescent Labeling after global deprotection considering the only free admins of apidaecin 137 is ornithine",
+  "expanded": "what happens if you perform Fluorescent Labeling after global deprotection considering the only free admins of apidaecin 137 is ornithine (related terms: fluorescein, fluorescein isothiocyanate, fluorophore, fluorescent dye, fluorescent probe)",
+  "expansion_terms": [
+   "fluorescein",
+   "fluorescein isothiocyanate",
+   "fluorophore",
+   "fluorescent dye",
+   "fluorescent probe"
+  ],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.75,
+  "classifier_reasoning": "The question asks about the technical outcome/procedure of performing fluorescent labeling after deprotection given the amine chemistry of a specific residue, which is a methods/mechanism question about experimental protocol rather than framing or novelty.",
+  "keyword_type": "general"
+ },
+ "q10": {
+  "rewritten": "what is the optimal time for peptide cleavage\n",
+  "expanded": "what is the optimal time for peptide cleavage\n",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.8,
+  "classifier_reasoning": "Asks about a specific technical protocol parameter (optimal cleavage time), which is a methods/procedural detail rather than rhetorical framing or novelty assessment.",
+  "keyword_type": "general"
+ },
+ "q11": {
+  "rewritten": "give me the first 4 intro slides based on recently uploaded peptide therapeutics reviews that highlight the growth and challenges of peptide therapeutics",
+  "expanded": "give me the first 4 intro slides based on recently uploaded peptide therapeutics reviews that highlight the growth and challenges of peptide therapeutics",
+  "expansion_terms": [],
+  "classifier_type": "summary",
+  "classifier_confidence": 0.65,
+  "classifier_reasoning": "The user wants a summarized overview (slides) of growth and challenges from multiple uploaded peptide therapeutics reviews, requiring synthesis across several papers rather than a single-paper answer or specific fact.",
+  "keyword_type": "general"
+ },
+ "q12": {
+  "rewritten": "concisely answer this with regards to finding peptide inhibitors to therapy resistant estrogen receptor based breast cancer: Would you also send the information of protein to him with the significance of protein and its function, why you want to do etc?\n\n\n\nKilian does not know what it is, so that you need to describe above.",
+  "expanded": "concisely answer this with regards to finding peptide inhibitors to therapy resistant estrogen receptor based breast cancer: Would you also send the information of protein to him with the significance of protein and its function, why you want to do etc?\n\n\n\nKilian does not know what it is, so that you need to describe above. (related terms: estrogen receptor alpha, ER-alpha, ESR1)",
+  "expansion_terms": [
+   "estrogen receptor alpha",
+   "ER-alpha",
+   "ESR1"
+  ],
+  "classifier_type": "framing",
+  "classifier_confidence": 0.65,
+  "classifier_reasoning": "Question asks how to communicate significance and purpose of a protein target to a collaborator, focusing on rhetorical positioning/justification rather than technical protocol details.",
+  "keyword_type": "novelty"
+ },
+ "q13": {
+  "rewritten": "this is a quote from a paper \"imaging the uptake of drug carriers presents a significant challenge using conventional Raman microscopy, since these frequently accumulate at much lower intracellular concentrations.\"\nWhat are the cellular concentrations that some drugs and peptide accumulate and what is the limit of detection using SRS",
+  "expanded": "this is a quote from a paper \"imaging the uptake of drug carriers presents a significant challenge using conventional Raman microscopy, since these frequently accumulate at much lower intracellular concentrations.\"\nWhat are the cellular concentrations that some drugs and peptide accumulate and what is the limit of detection using SRS (related terms: stimulated Raman scattering, coherent Raman, SRS imaging, Raman spectroscopy, Raman imaging)",
+  "expansion_terms": [
+   "stimulated Raman scattering",
+   "coherent Raman",
+   "SRS imaging",
+   "Raman spectroscopy",
+   "Raman imaging"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.8,
+  "classifier_reasoning": "Asks for specific numeric values (intracellular concentrations, LOD) that are objective and verifiable facts from the paper.",
+  "keyword_type": "methods"
+ },
+ "q14": {
+  "rewritten": "please give an indepth summary of Wei Min's review article: Theory, innovations and applications of stimulated Raman scattering microscopy",
+  "expanded": "please give an indepth summary of Wei Min's review article: Theory, innovations and applications of stimulated Raman scattering microscopy (related terms: coherent Raman, SRS imaging, Raman spectroscopy, Raman imaging, vibrational imaging)",
+  "expansion_terms": [
+   "coherent Raman",
+   "SRS imaging",
+   "Raman spectroscopy",
+   "Raman imaging",
+   "vibrational imaging"
+  ],
+  "classifier_type": "summary",
+  "classifier_confidence": 0.95,
+  "classifier_reasoning": "The query explicitly asks for an in-depth summary of a specific review article, focusing on a single paper's content.",
+  "keyword_type": "general"
+ },
+ "q15": {
+  "rewritten": "are you able to identify this paper in the library? \nReview article https://doi.org/10.1038/s41566-025-01707-z\nTheory, innovations and applications of\nstimulated Raman scattering microscopy\nWei Min  1 , Ji-Xin Cheng  2 & Yasuyuki Ozeki  3",
+  "expanded": "are you able to identify this paper in the library? \nReview article https://doi.org/10.1038/s41566-025-01707-z\nTheory, innovations and applications of\nstimulated Raman scattering microscopy\nWei Min  1 , Ji-Xin Cheng  2 & Yasuyuki Ozeki  3 (related terms: coherent Raman, SRS imaging, Raman spectroscopy, Raman imaging, vibrational imaging)",
+  "expansion_terms": [
+   "coherent Raman",
+   "SRS imaging",
+   "Raman spectroscopy",
+   "Raman imaging",
+   "vibrational imaging"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.7,
+  "classifier_reasoning": "The query asks to identify/verify a specific paper's presence in the library, which is a factual lookup rather than analysis of content.",
+  "keyword_type": "general"
+ },
+ "q16": {
+  "rewritten": "what is the mic of apidaecin analogs including api 137 (minimum inhibitory concentration)",
+  "expanded": "what is the mic of apidaecin analogs including api 137 (minimum inhibitory concentration) (related terms: IC-50, IC₅₀, half-maximal inhibitory concentration, minimal inhibitory concentration)",
+  "expansion_terms": [
+   "IC-50",
+   "IC₅₀",
+   "half-maximal inhibitory concentration",
+   "minimal inhibitory concentration"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.9,
+  "classifier_reasoning": "Asks for a specific numeric value (MIC) for named compounds, an objective verifiable fact.",
+  "keyword_type": "methods"
+ },
+ "q17": {
+  "rewritten": "tell me the link between LSPR and optical properties of hollow nanoparticles and how this relates to more sensitive SERS detection",
+  "expanded": "tell me the link between LSPR and optical properties of hollow nanoparticles and how this relates to more sensitive SERS detection",
+  "expansion_terms": [],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.7,
+  "classifier_reasoning": "Asks for mechanistic/factual explanation of how LSPR and optical properties relate to SERS sensitivity, not framing or comparison.",
+  "keyword_type": "general"
+ },
+ "q18": {
+  "rewritten": "give me a problem statement for why plasmonic SERS detection is useful for SARS-CoV-2",
+  "expanded": "give me a problem statement for why plasmonic SERS detection is useful for SARS-CoV-2",
+  "expansion_terms": [],
+  "classifier_type": "framing",
+  "classifier_confidence": 0.8,
+  "classifier_reasoning": "Asks for a problem statement to justify/position the significance of SERS detection for SARS-CoV-2, a rhetorical framing task rather than technical details or facts.",
+  "keyword_type": "general"
+ },
+ "q19": {
+  "rewritten": "who discovered SRC2-SP4 and R4K1",
+  "expanded": "who discovered SRC2-SP4 and R4K1 (related terms: coactivator binding, coactivator recruitment)",
+  "expansion_terms": [
+   "coactivator binding",
+   "coactivator recruitment"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.7,
+  "classifier_reasoning": "Asks for a specific factual attribution (who discovered these entities), which is objective and verifiable rather than assessing novelty or comparison.",
+  "keyword_type": "novelty"
+ },
+ "q20": {
+  "rewritten": "can you help me identify a new target in the nuclear receptor family to identify an LXXLL like motif? ",
+  "expanded": "can you help me identify a new target in the nuclear receptor family to identify an LXXLL like motif? ",
+  "expansion_terms": [],
+  "classifier_type": "novelty",
+  "classifier_confidence": 0.6,
+  "classifier_reasoning": "The query asks to identify a new, unexplored target/opportunity in the nuclear receptor family, which involves assessing existing knowledge to find gaps, characteristic of novelty assessment rather than a straightforward factual lookup.",
+  "keyword_type": "general"
+ },
+ "q21": {
+  "rewritten": "please summarize the medchem review articles from acs medi that I recently uploaded",
+  "expanded": "please summarize the medchem review articles from acs medi that I recently uploaded",
+  "expansion_terms": [],
+  "classifier_type": "summary",
+  "classifier_confidence": 0.9,
+  "classifier_reasoning": "Query asks to summarize multiple uploaded review articles, requiring synthesis across several papers rather than a single document.",
+  "keyword_type": "general"
+ },
+ "q22": {
+  "rewritten": "can you summarize all emerging target classes and modalities",
+  "expanded": "can you summarize all emerging target classes and modalities",
+  "expansion_terms": [],
+  "classifier_type": "summary",
+  "classifier_confidence": 0.75,
+  "classifier_reasoning": "The query asks to summarize emerging target classes and modalities across research, implying synthesis across multiple sources rather than a single paper.",
+  "keyword_type": "general"
+ },
+ "q23": {
+  "rewritten": "list the major labs in peptide therapy research ",
+  "expanded": "list the major labs in peptide therapy research ",
+  "expansion_terms": [],
+  "classifier_type": "general",
+  "classifier_confidence": 0.6,
+  "classifier_reasoning": "Query asks for a list of major research labs in a field, which is not a factual/mechanistic question, nor framing, methods, novelty, or comparative; it's a broad informational request requiring synthesis across sources.",
+  "keyword_type": "general"
+ },
+ "q24": {
+  "rewritten": "why do you suggest: Alanna Schepartz Lab (UC Berkeley)  and what are key findings from her lab?",
+  "expanded": "why do you suggest: Alanna Schepartz Lab (UC Berkeley)  and what are key findings from her lab?",
+  "expansion_terms": [],
+  "classifier_type": "summary",
+  "classifier_confidence": 0.7,
+  "classifier_reasoning": "Asks for key findings from a specific lab, requiring summarization/synthesis across that lab's work rather than a single fact or paper.",
+  "keyword_type": "novelty"
+ },
+ "q25": {
+  "rewritten": "I want to come up with a beta peptide project to propose to Alanna. I'm thinking replacing the lxxll motif with a beta peptide. Could you search for sequences and structures that would work ",
+  "expanded": "I want to come up with a beta peptide project to propose to Alanna. I'm thinking replacing the lxxll motif with a beta peptide. Could you search for sequences and structures that would work ",
+  "expansion_terms": [],
+  "classifier_type": "general",
+  "classifier_confidence": 0.55,
+  "classifier_reasoning": "Low confidence classification, using general strategy. Original: Query seeks existing sequences/structures for a proposed beta-peptide replacement of LXXLL motif, effectively assessing prior art and design space to identify feasible novel approaches, requiring synthesis across literature rather than a single fact or paper.",
+  "keyword_type": "general"
+ },
+ "q26": {
+  "rewritten": "What are the ways to connect peptide side chains? I'm aware of hydrocarbon staples, salt bridges kind of make sense ",
+  "expanded": "What are the ways to connect peptide side chains? I'm aware of hydrocarbon staples, salt bridges kind of make sense ",
+  "expansion_terms": [],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.7,
+  "classifier_reasoning": "Asks for factual information about known chemical methods/mechanisms for connecting peptide side chains, not a comparison or novelty assessment.",
+  "keyword_type": "general"
+ },
+ "q27": {
+  "rewritten": "What concentrations can be detected with Stimulated Raman Scattering and answer the same question but for drugs",
+  "expanded": "What concentrations can be detected with Stimulated Raman Scattering and answer the same question but for drugs (related terms: coherent Raman, SRS imaging, Raman spectroscopy, Raman imaging, vibrational imaging)",
+  "expansion_terms": [
+   "coherent Raman",
+   "SRS imaging",
+   "Raman spectroscopy",
+   "Raman imaging",
+   "vibrational imaging"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.75,
+  "classifier_reasoning": "The query asks for specific detectable concentration values with SRS for general use and drugs, which is a factual/numeric question rather than positioning, methods protocol, or novelty assessment.",
+  "keyword_type": "methods"
+ },
+ "q28": {
+  "rewritten": "please analyze papers on skin analysis using SRS especially those authored by Conor Evan and report the detection limits ",
+  "expanded": "please analyze papers on skin analysis using SRS especially those authored by Conor Evan and report the detection limits  (related terms: stimulated Raman scattering, coherent Raman, SRS imaging)",
+  "expansion_terms": [
+   "stimulated Raman scattering",
+   "coherent Raman",
+   "SRS imaging"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.7,
+  "classifier_reasoning": "The query asks for a specific factual value (detection limits) across multiple papers by a specific author, requiring synthesis across the corpus but seeking objective, verifiable data rather than framing, methods, or novelty assessment.",
+  "keyword_type": "general"
+ },
+ "q29": {
+  "rewritten": "what's the protocol for adding nntetramethylguanidine to the nterminal of a peptide? give me a recipe for a 0.1mmol reaction",
+  "expanded": "what's the protocol for adding nntetramethylguanidine to the nterminal of a peptide? give me a recipe for a 0.1mmol reaction",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.95,
+  "classifier_reasoning": "Asks for a specific technical protocol/recipe for a chemical reaction at defined scale, which is a methods question.",
+  "keyword_type": "methods"
+ },
+ "q30": {
+  "rewritten": "any protocols for in solution glaser coupling on a peptide off resin?",
+  "expanded": "any protocols for in solution glaser coupling on a peptide off resin?",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.9,
+  "classifier_reasoning": "Query asks about a specific technical protocol for performing Glaser coupling on peptides in solution, which is a methods/procedure question.",
+  "keyword_type": "methods"
+ },
+ "q31": {
+  "rewritten": "I am trying to make the apidaecin analogs belwo where pra is propargyl glycine and gu is NNNNtetramethylguanidino group on the Nterminus.\nY7Pra: guONNRPVPraIPRPRPPHPRL, exact mass 2223.32\nP11Pra: guONNRPVYIPRPraRPPHPRL exact mass 2289.33\nP9Pra: guONNRPVYIPraRPRPPHPRL exact mass 2289.33\nL18Pra: guONNRPVYIPRPRPPHPRPra exact mass2273.3\n\nThe masses observed via MALDI TOF for each are below. help me make a plan to troubleshoot what is going wrong. Start by extracting how these mutation points can cause issues, then extract CEM Liberty microwave assisted SPPS protocols, gu protocols, \nY7Pra: 2156.62, 2288.81, 1926.49, 2198.65, 2359.87, 1996.57, 2063.68, 2125.66, 2178.67, 2218.72, 2416.95 \nP9Pra:did not ionize \nP11Pra: 1093.77, 2061.31, 2133.42\nL18Pra: 902.6, 974.71, 890.62, 1778.16, 1925.38, 2024.49",
+  "expanded": "I am trying to make the apidaecin analogs belwo where pra is propargyl glycine and gu is NNNNtetramethylguanidino group on the Nterminus.\nY7Pra: guONNRPVPraIPRPRPPHPRL, exact mass 2223.32\nP11Pra: guONNRPVYIPRPraRPPHPRL exact mass 2289.33\nP9Pra: guONNRPVYIPraRPRPPHPRL exact mass 2289.33\nL18Pra: guONNRPVYIPRPRPPHPRPra exact mass2273.3\n\nThe masses observed via MALDI TOF for each are below. help me make a plan to troubleshoot what is going wrong. Start by extracting how these mutation points can cause issues, then extract CEM Liberty microwave assisted SPPS protocols, gu protocols, \nY7Pra: 2156.62, 2288.81, 1926.49, 2198.65, 2359.87, 1996.57, 2063.68, 2125.66, 2178.67, 2218.72, 2416.95 \nP9Pra:did not ionize \nP11Pra: 1093.77, 2061.31, 2133.42\nL18Pra: 902.6, 974.71, 890.62, 1778.16, 1925.38, 2024.49 (related terms: minimum inhibitory concentration, minimal inhibitory concentration)",
+  "expansion_terms": [
+   "minimum inhibitory concentration",
+   "minimal inhibitory concentration"
+  ],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.75,
+  "classifier_reasoning": "The query asks to extract SPPS protocols and troubleshoot synthesis/mass spec issues related to specific mutations, which is a technical, procedural request about how the peptides were made and characterized, fitting METHODS despite mention of troubleshooting.",
+  "keyword_type": "methods"
+ },
+ "q32": {
+  "rewritten": "search the literature and suggest a protocol for in solution glaser coupling using CuCl, BiPy, for AcHKIPrSHRPrSLQDS-NH2\nwhere PrS is propargyl serine",
+  "expanded": "search the literature and suggest a protocol for in solution glaser coupling using CuCl, BiPy, for AcHKIPrSHRPrSLQDS-NH2\nwhere PrS is propargyl serine",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.9,
+  "classifier_reasoning": "The query asks for a technical protocol for a chemical coupling reaction, requiring literature search for procedural/methodological details rather than framing or novelty assessment.",
+  "keyword_type": "methods"
+ },
+ "q33": {
+  "rewritten": "please suggest alternatives for using diisopropylcarbodiide for microwave assisted oxyma DIC SPPS",
+  "expanded": "please suggest alternatives for using diisopropylcarbodiide for microwave assisted oxyma DIC SPPS (related terms: minimum inhibitory concentration, minimal inhibitory concentration)",
+  "expansion_terms": [
+   "minimum inhibitory concentration",
+   "minimal inhibitory concentration"
+  ],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.85,
+  "classifier_reasoning": "The query asks for alternative reagents/protocols to a specific coupling reagent in solid-phase peptide synthesis, which is a technical/procedural question about how synthesis is performed.",
+  "keyword_type": "general"
+ },
+ "q34": {
+  "rewritten": "look at Su-2016-Copper Catalysis for Selective Hetero paper and tell me the protocol for using TMEDA, CuCl and adapt it to a peptide",
+  "expanded": "look at Su-2016-Copper Catalysis for Selective Hetero paper and tell me the protocol for using TMEDA, CuCl and adapt it to a peptide",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.85,
+  "classifier_reasoning": "Query asks for a specific technical protocol (catalyst conditions) and how to adapt it to peptide synthesis, which is a methods/procedure question rather than framing or novelty.",
+  "keyword_type": "methods"
+ },
+ "q36": {
+  "rewritten": "can you use a 2 chlorotrityl chloride resin to put an amide on the N terminus? to form an acid labile resin similar to Sieber amide resin",
+  "expanded": "can you use a 2 chlorotrityl chloride resin to put an amide on the N terminus? to form an acid labile resin similar to Sieber amide resin",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.75,
+  "classifier_reasoning": "Asks about a technical feasibility/protocol question regarding resin chemistry for solid-phase peptide synthesis, not rhetorical framing or novelty assessment.",
+  "keyword_type": "general"
+ },
+ "q37": {
+  "rewritten": "what are some common antimicrobial peptides targeting gram positive bacteria",
+  "expanded": "what are some common antimicrobial peptides targeting gram positive bacteria (related terms: host defense peptide, minimum inhibitory concentration, minimal inhibitory concentration)",
+  "expansion_terms": [
+   "host defense peptide",
+   "minimum inhibitory concentration",
+   "minimal inhibitory concentration"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.7,
+  "classifier_reasoning": "Asks for specific factual examples of antimicrobial peptides, requiring general domain knowledge rather than a single paper's focus.",
+  "keyword_type": "general"
+ },
+ "q38": {
+  "rewritten": "in what cases can e.coli infect human, pig, or mouse skin?",
+  "expanded": "in what cases can e.coli infect human, pig, or mouse skin?",
+  "expansion_terms": [],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.6,
+  "classifier_reasoning": "Asks for specific conditions/mechanisms under which E. coli can infect various skin types, which is a factual/mechanistic question rather than framing, novelty, or comparison.",
+  "keyword_type": "general"
+ },
+ "q39": {
+  "rewritten": "what is the protocol for infecting skin with e.coli? ",
+  "expanded": "what is the protocol for infecting skin with e.coli? ",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.9,
+  "classifier_reasoning": "Asks for a specific experimental protocol for infecting skin with E. coli, which concerns technical procedure details rather than framing or novelty.",
+  "keyword_type": "methods"
+ },
+ "q40": {
+  "rewritten": "i want to get a quote for  the plasmid prep and expression of estrogen receptor LBD WT, D538G, and Y537S mutants. Genscript asked me for : expression system, scale, application. Please give me the answers based on relevant papers ",
+  "expanded": "i want to get a quote for  the plasmid prep and expression of estrogen receptor LBD WT, D538G, and Y537S mutants. Genscript asked me for : expression system, scale, application. Please give me the answers based on relevant papers  (related terms: estrogen receptor alpha, ER-alpha, ESR1, Y537S mutation, tyrosine 537 serine)",
+  "expansion_terms": [
+   "estrogen receptor alpha",
+   "ER-alpha",
+   "ESR1",
+   "Y537S mutation",
+   "tyrosine 537 serine"
+  ],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.8,
+  "classifier_reasoning": "The query asks for specific technical parameters (expression system, scale, application) needed to produce protein constructs, which is a methods/protocol detail question rather than framing or novelty.",
+  "keyword_type": "general"
+ },
+ "q41": {
+  "rewritten": "I want to convert a few ideas into research papers. I want to keep a running tab on my paper ideas, start gathering citations for the introduction, brainstorm impact and target journals, and come up with other ideas to make sure these ideas lead to papers\n1. azide tagged antimicrobial peptide for pharmacokinetic in cell bacterial studies using Mid-infrared Photothermal Modulated Fluorescence.\n2. alkyne tagged peptides on Stimulated Raman Photothermal microscopy \n3. antimicrobial peptides in cyanobacteria\n4. ERalpha LBD mRNA display screen \n5. Glaser stapled SRC2 inhibitors with SRS imaging\n6. BADY on peptide for SRS imaging\n7. finding antimicrobial peptides targeting bacteria on human skin and doing an SRS imaging study in Conor Evans lab\n8. Company funding study on peptides used in the beauty industry for health of human facial skin",
+  "expanded": "I want to convert a few ideas into research papers. I want to keep a running tab on my paper ideas, start gathering citations for the introduction, brainstorm impact and target journals, and come up with other ideas to make sure these ideas lead to papers\n1. azide tagged antimicrobial peptide for pharmacokinetic in cell bacterial studies using Mid-infrared Photothermal Modulated Fluorescence.\n2. alkyne tagged peptides on Stimulated Raman Photothermal microscopy \n3. antimicrobial peptides in cyanobacteria\n4. ERalpha LBD mRNA display screen \n5. Glaser stapled SRC2 inhibitors with SRS imaging\n6. BADY on peptide for SRS imaging\n7. finding antimicrobial peptides targeting bacteria on human skin and doing an SRS imaging study in Conor Evans lab\n8. Company funding study on peptides used in the beauty industry for health of human facial skin (related terms: stimulated Raman scattering, coherent Raman, Raman spectroscopy, Raman imaging, vibrational imaging)",
+  "expansion_terms": [
+   "stimulated Raman scattering",
+   "coherent Raman",
+   "Raman spectroscopy",
+   "Raman imaging",
+   "vibrational imaging"
+  ],
+  "classifier_type": "general",
+  "classifier_confidence": 0.55,
+  "classifier_reasoning": "The query is a broad brainstorming/organizational request spanning multiple project ideas, citation gathering, impact framing, and journal targeting—doesn't map cleanly to a single category like methods or novelty, and requires synthesizing across multiple potential papers/topics.",
+  "keyword_type": "novelty"
+ },
+ "q42": {
+  "rewritten": "I want to attempt a reaction of fmoc l propargyl glycine with phenylacetylene to get 2-((((9H-fluoren-9-yl)methoxy)carbonyl)amino)-7-phenylhepta-4,6-diynoic acid.\ntell me 1. the reaction conditions\n2. whether the product is patentable\n3. other conditions to try",
+  "expanded": "I want to attempt a reaction of fmoc l propargyl glycine with phenylacetylene to get 2-((((9H-fluoren-9-yl)methoxy)carbonyl)amino)-7-phenylhepta-4,6-diynoic acid.\ntell me 1. the reaction conditions\n2. whether the product is patentable\n3. other conditions to try",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.7,
+  "classifier_reasoning": "The query primarily asks about reaction conditions (technical/methods) and alternative conditions to try; the patentability question is secondary but the dominant focus is experimental protocol.",
+  "keyword_type": "general"
+ },
+ "q43": {
+  "rewritten": "would a diyne be IR active",
+  "expanded": "would a diyne be IR active (related terms: alkyne, diyne tag)",
+  "expansion_terms": [
+   "alkyne",
+   "diyne tag"
+  ],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.85,
+  "classifier_reasoning": "Asks for an objective, verifiable fact about vibrational IR activity of a diyne functional group based on molecular symmetry/dipole change.",
+  "keyword_type": "general"
+ },
+ "q44": {
+  "rewritten": "what are other high raman cross-section groups that I can use to put on peptides for imaging",
+  "expanded": "what are other high raman cross-section groups that I can use to put on peptides for imaging (related terms: Raman spectroscopy, Raman imaging, vibrational imaging, gel filtration, size exclusion chromatography)",
+  "expansion_terms": [
+   "Raman spectroscopy",
+   "Raman imaging",
+   "vibrational imaging",
+   "gel filtration",
+   "size exclusion chromatography"
+  ],
+  "classifier_type": "novelty",
+  "classifier_confidence": 0.6,
+  "classifier_reasoning": "The query seeks alternative existing chemical groups with high Raman cross-section for peptide labeling, requiring assessment of prior work/options across literature rather than a single fact, aligning with novelty/gap identification.",
+  "keyword_type": "general"
+ },
+ "q45": {
+  "rewritten": "I want to perform reactions to make Fmoc L PhDY glycine (2-((((9H-fluoren-9-yl)methoxy)carbonyl)amino)-7-phenylhepta-4,6-diynoic acid), Fmoc L BADY phenylalanine (2-((((9H-fluoren-9-yl)methoxy)carbonyl)amino)-3-(4-(phenylbuta-1,3-diyn-1-yl)phenyl)propanoic acid), and N-(((9H-fluoren-9-yl)methoxy)carbonyl)-O-(5-phenylpenta-2,4-diyn-1-yl)serine. Please give the best reaction condition for the best yield and easy workup.",
+  "expanded": "I want to perform reactions to make Fmoc L PhDY glycine (2-((((9H-fluoren-9-yl)methoxy)carbonyl)amino)-7-phenylhepta-4,6-diynoic acid), Fmoc L BADY phenylalanine (2-((((9H-fluoren-9-yl)methoxy)carbonyl)amino)-3-(4-(phenylbuta-1,3-diyn-1-yl)phenyl)propanoic acid), and N-(((9H-fluoren-9-yl)methoxy)carbonyl)-O-(5-phenylpenta-2,4-diyn-1-yl)serine. Please give the best reaction condition for the best yield and easy workup.",
+  "expansion_terms": [],
+  "classifier_type": "methods",
+  "classifier_confidence": 0.85,
+  "classifier_reasoning": "The query asks for specific reaction conditions to synthesize these compounds with best yield and workup, which is a technical protocol/procedure question, fitting METHODS.",
+  "keyword_type": "general"
+ },
+ "q46": {
+  "rewritten": "give me details using triethylamine as the base and has the highest yield using Pd(PPh₃)₂Cl₂",
+  "expanded": "give me details using triethylamine as the base and has the highest yield using Pd(PPh₃)₂Cl₂",
+  "expansion_terms": [],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.7,
+  "classifier_reasoning": "Query asks for specific factual details about a reaction condition (base) and catalyst giving highest yield, which is an objective, verifiable detail rather than framing, methods description, or novelty assessment.",
+  "keyword_type": "general"
+ },
+ "q47": {
+  "rewritten": "can you tell me how then concentration of apidaecin that accumulates inside cells",
+  "expanded": "can you tell me how then concentration of apidaecin that accumulates inside cells",
+  "expansion_terms": [],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.8,
+  "classifier_reasoning": "Asks for a specific quantitative fact (intracellular concentration) rather than method, novelty, or framing.",
+  "keyword_type": "methods"
+ },
+ "q48": {
+  "rewritten": "find the papers that mention intracellular concentration of peptides",
+  "expanded": "find the papers that mention intracellular concentration of peptides",
+  "expansion_terms": [],
+  "classifier_type": "factual",
+  "classifier_confidence": 0.6,
+  "classifier_reasoning": "The query asks to locate papers discussing a specific factual measurement (intracellular peptide concentration) across the corpus, requiring cross-paper search rather than a single-paper technical or rhetorical analysis.",
+  "keyword_type": "methods"
+ },
+ "q50": {
+  "rewritten": "based on my library and what you know about me, what would be 3 research focii for my independent research lab",
+  "expanded": "based on my library and what you know about me, what would be 3 research focii for my independent research lab",
+  "expansion_terms": [],
+  "classifier_type": "general",
+  "classifier_confidence": 0.6,
+  "classifier_reasoning": "Asks for broad synthesis across the user's entire library and personal profile to suggest future research directions, not a fact/method/comparison about a specific paper; requires cross-corpus synthesis.",
+  "keyword_type": "general"
+ }
+}

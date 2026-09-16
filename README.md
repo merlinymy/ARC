@@ -201,9 +201,34 @@ python test_rag.py "What is the role of LL37 in antimicrobial activity?"
 
 ### Running Evaluation
 
+The W5 retrieval harness lives in `backend/evaluation/`. It measures retrieval
+only — it never generates an answer.
+
 ```bash
-python run_evaluation.py
+cd backend
+
+# Everything: retrieve -> pool -> judge -> score. Re-runs are free; every
+# retrieval, embedding and relevance judgment is cached to disk.
+python -m evaluation.run_w5
+
+# Score an existing run without spending anything
+python -m evaluation.run_w5 --stages score --metric ndcg@10
+
+# Preview judging cost before spending
+python -m evaluation.run_w5 --stages pool judge --estimate-only
+
+# Rebuild the golden query set from backend/data/app.db, or verify it still matches
+python -m evaluation.build_query_set
+python -m evaluation.build_query_set --check
 ```
+
+Durable assets: `evaluation/golden_queries_v1.json` (50 real user queries) and
+`evaluation/qrels_v1.json` (pooled graded relevance labels). Baselines are
+written to `evaluation/results/baseline_<date>.json`.
+
+This replaces the former `backend/run_evaluation.py`, which required a full
+answer-generation pass to report retrieval quality and scored against
+hand-invented expected topics rather than relevance judgments.
 
 ## Retrieval Strategy
 

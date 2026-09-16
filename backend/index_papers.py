@@ -543,7 +543,7 @@ Examples:
         print(f"\nWarning: Could not get collection stats: {e}")
 
     print(f"\nCheckpoint saved to: {CHECKPOINT_FILE}")
-    print("✓ Ready to run evaluation: python run_evaluation.py")
+    print("✓ Ready to run evaluation: python -m evaluation.run_w5")
     print()
 
 

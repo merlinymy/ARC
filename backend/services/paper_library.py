@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from config import settings
 from preprocessing import EnhancedPDFProcessor, Chunk, ChunkType
+from preprocessing import paper_record as pr
 from retrieval.embedder import VoyageEmbedder
 from retrieval.qdrant_store import QdrantStore
 from retrieval.bm25 import BM25Vectorizer
@@ -720,6 +721,7 @@ class PaperLibraryService:
         1. The PDF file (if found)
         2. All chunks from Qdrant
         3. Entry from checkpoint file
+        4. The persisted paper record and its figure crops
 
         Returns:
             Dict with deletion results
@@ -729,6 +731,8 @@ class PaperLibraryService:
             "pdf_deleted": False,
             "chunks_deleted": 0,
             "checkpoint_updated": False,
+            "record_deleted": False,
+            "figures_deleted": 0,
         }
 
         # Delete PDF file
@@ -777,6 +781,18 @@ class PaperLibraryService:
 
         self._save_checkpoint(checkpoint)
         result["checkpoint_updated"] = True
+
+        # The record and its crops are the only per-paper state outside Qdrant
+        # and the PDF. Leaving them behind would grow processed_data/ forever as
+        # papers are re-uploaded and deleted.
+        try:
+            record_file = pr.record_path(paper_id)
+            if record_file.exists():
+                record_file.unlink()
+                result["record_deleted"] = True
+            result["figures_deleted"] = pr.delete_assets(paper_id)
+        except OSError as e:
+            logger.warning(f"Could not delete processed data for {paper_id}: {e}")
 
         logger.info(f"Deleted paper {paper_id}: {result}")
         return result

@@ -1,9 +1,104 @@
 """Configuration management for the Research Paper RAG System."""
 
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, model_validator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
+
+
+# ---------------------------------------------------------------------------
+# Embedding profiles — the model and its collection as one unit
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EmbeddingProfile:
+    """An embedding model bound to the one Qdrant collection its vectors live in.
+
+    The model and the collection are a *pair*, never two independent settings.
+    A query vector produced by one model and scored against document vectors
+    produced by another returns plausible-looking nonsense — no exception, no
+    empty result, just silently wrong retrieval.  So there is deliberately no
+    way to set the two inconsistently: changing embedding model means changing
+    profile, and the collection moves with it.
+
+    Add a profile when you add a model.  Never edit one in place once its
+    collection has been built — that is the same mismatch wearing a hat.
+    """
+
+    #: How the profile is selected: ``EMBEDDING_PROFILE=<name>``.
+    name: str
+    #: Voyage model id.
+    model: str
+    #: Vector size, as the collection was created.
+    dimension: int
+    #: The collection built by *this* model, and by no other.
+    collection: str
+    #: ``voyage-context-*``: a paper's chunks go nested to
+    #: ``contextualized_embed`` and come back document-aware.  Measured
+    #: 2026-09-16: ``client.embed()`` rejects the context models outright and
+    #: ``contextualized_embed`` rejects every other model, so the endpoint
+    #: follows from the model rather than being a separate choice.
+    contextualized: bool = False
+    #: Per-document context window, in tokens of the model's own tokenizer.
+    #: Measured 2026-09-16: a hard 400, and "contextualized chunk embeddings
+    #: do not support truncation".  0 = not applicable.
+    context_window_tokens: int = 0
+    #: Ceiling on the sum of every document in one request (measured
+    #: 2026-09-16: "The max allowed tokens per submitted batch is 120000").
+    max_batch_tokens: int = 0
+
+
+EMBEDDING_PROFILES: Dict[str, "EmbeddingProfile"] = {
+    profile.name: profile
+    for profile in (
+        # The live index: 212,953 points on 2026-09-16.  Keeps serving until
+        # the cutover, so this stays the default.
+        EmbeddingProfile(
+            name="voyage-3-large",
+            model="voyage-3-large",
+            dimension=1024,
+            collection="research_papers",
+        ),
+        # §3b.8 — contextualized chunk embeddings.  Built by the W1+W2 reindex
+        # into its own collection; the cutover is a profile switch.
+        EmbeddingProfile(
+            name="voyage-context-4",
+            model="voyage-context-4",
+            dimension=1024,
+            collection="research_papers_ctx4",
+            contextualized=True,
+            context_window_tokens=32_000,
+            max_batch_tokens=120_000,
+        ),
+    )
+}
+
+DEFAULT_EMBEDDING_PROFILE = "voyage-3-large"
+
+
+def get_embedding_profile(name: str) -> EmbeddingProfile:
+    """Look up a profile by name, failing with the list of real options."""
+    try:
+        return EMBEDDING_PROFILES[name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown embedding profile {name!r}. "
+            f"Known profiles: {', '.join(sorted(EMBEDDING_PROFILES))}."
+        ) from None
+
+
+def profile_for_collection(collection: str) -> Optional[EmbeddingProfile]:
+    """The profile that built ``collection``, if any.
+
+    For a caller holding only a collection name that needs to know which model
+    is allowed to write to it or query it.
+    """
+    for profile in EMBEDDING_PROFILES.values():
+        if profile.collection == collection:
+            return profile
+    return None
 
 
 class Settings(BaseSettings):
@@ -63,10 +158,10 @@ class Settings(BaseSettings):
     test_queries_path: Path = Path("./data/test_queries.json")
     evaluation_results_path: Path = Path("./data/evaluation_results.json")
 
-    # Qdrant Configuration
+    # Qdrant Configuration.  The collection name is NOT here: it belongs to
+    # the embedding profile, and is exposed as `qdrant_collection_name` below.
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333
-    qdrant_collection_name: str = "research_papers"
 
     # Application Settings
     environment: str = "development"
@@ -100,9 +195,30 @@ class Settings(BaseSettings):
     api_port: int = 8001
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
 
-    # Embedding Settings
-    embedding_model: str = "voyage-3-large"
-    embedding_dimension: int = 1024
+    # Embedding Settings — one knob, because the model, its dimension and its
+    # collection cannot be chosen independently.  See EmbeddingProfile.
+    embedding_profile: str = Field(
+        default=DEFAULT_EMBEDDING_PROFILE,
+        description=(
+            "Embedding profile name: selects the Voyage model, the vector "
+            "dimension and the Qdrant collection together. One of: "
+            + ", ".join(sorted(EMBEDDING_PROFILES))
+        ),
+    )
+
+    # Retired settings, declared only to catch a stale environment.  Each used
+    # to be settable on its own, which is exactly the inconsistency the profile
+    # exists to prevent; a value that disagrees with the active profile is an
+    # error rather than something to ignore quietly.
+    retired_qdrant_collection_name: Optional[str] = Field(
+        default=None, validation_alias="QDRANT_COLLECTION_NAME", exclude=True,
+    )
+    retired_embedding_model: Optional[str] = Field(
+        default=None, validation_alias="EMBEDDING_MODEL", exclude=True,
+    )
+    retired_embedding_dimension: Optional[int] = Field(
+        default=None, validation_alias="EMBEDDING_DIMENSION", exclude=True,
+    )
 
     # LLM Settings
     # Main model for answer generation
@@ -121,6 +237,54 @@ class Settings(BaseSettings):
         "case_sensitive": False,
         "extra": "ignore",  # Ignore extra env vars
     }
+
+    # ------------------------------------------------------------------
+    # Embedding profile: model, dimension and collection, never apart
+    # ------------------------------------------------------------------
+
+    @property
+    def embedding(self) -> EmbeddingProfile:
+        """The active profile."""
+        return get_embedding_profile(self.embedding_profile)
+
+    @property
+    def embedding_model(self) -> str:
+        """Voyage model id.  Read-only: set EMBEDDING_PROFILE instead."""
+        return self.embedding.model
+
+    @property
+    def embedding_dimension(self) -> int:
+        """Vector size.  Read-only: set EMBEDDING_PROFILE instead."""
+        return self.embedding.dimension
+
+    @property
+    def qdrant_collection_name(self) -> str:
+        """The collection this model's vectors live in.  Read-only."""
+        return self.embedding.collection
+
+    @model_validator(mode="after")
+    def _embedding_profile_is_consistent(self) -> "Settings":
+        """Reject an environment that still sets the model or collection apart.
+
+        Silently ignoring `QDRANT_COLLECTION_NAME=research_papers` while the
+        profile says otherwise would recreate the exact failure the profile
+        removes, one .env file later.
+        """
+        profile = get_embedding_profile(self.embedding_profile)
+        for env_name, value, pinned in (
+            ("QDRANT_COLLECTION_NAME", self.retired_qdrant_collection_name, profile.collection),
+            ("EMBEDDING_MODEL", self.retired_embedding_model, profile.model),
+            ("EMBEDDING_DIMENSION", self.retired_embedding_dimension, profile.dimension),
+        ):
+            if value is not None and str(value) != str(pinned):
+                raise ValueError(
+                    f"{env_name}={value!r} contradicts EMBEDDING_PROFILE="
+                    f"{profile.name!r}, which pins it to {pinned!r}. The "
+                    f"embedding model and its collection move together — drop "
+                    f"{env_name} from the environment and select a profile "
+                    f"instead (known: {', '.join(sorted(EMBEDDING_PROFILES))})."
+                )
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:

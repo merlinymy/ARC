@@ -14,7 +14,7 @@ Features:
 - Dry-run mode for testing
 
 Usage:
-    python batch_extract_doi_metadata.py [--dry-run] [--api-url http://localhost:8000]
+    python batch_extract_doi_metadata.py [--dry-run] [--api-url http://localhost:8001]
 """
 
 import argparse
@@ -28,7 +28,7 @@ import sys
 class DOIBatchProcessor:
     """Batch processor for extracting DOIs and updating metadata."""
 
-    def __init__(self, api_url: str = "http://localhost:8000", dry_run: bool = False, rate_limit: float = 1.0):
+    def __init__(self, api_url: str = "http://localhost:8001", dry_run: bool = False, rate_limit: float = 1.0):
         """
         Initialize the batch processor.
 
@@ -351,7 +351,7 @@ Examples:
   python batch_extract_doi_metadata.py
 
   # Use custom API URL
-  python batch_extract_doi_metadata.py --api-url http://localhost:8000
+  python batch_extract_doi_metadata.py --api-url http://localhost:8001
 
   # Custom rate limit (2 seconds between requests)
   python batch_extract_doi_metadata.py --rate-limit 2.0
@@ -364,8 +364,8 @@ Examples:
     )
     parser.add_argument(
         '--api-url',
-        default='http://localhost:8000',
-        help='Base URL of the API (default: http://localhost:8000)'
+        default='http://localhost:8001',
+        help='Base URL of the API (default: http://localhost:8001)'
     )
     parser.add_argument(
         '--rate-limit',

@@ -20,7 +20,7 @@ sleep 2
 # Start quick tunnel in background
 echo ""
 echo "Starting Cloudflare Tunnel..."
-cloudflared tunnel --url http://localhost:8000 > ./backend/logs/cloudflare-tunnel.log 2>&1 &
+cloudflared tunnel --url http://localhost:8001 > ./backend/logs/cloudflare-tunnel.log 2>&1 &
 TUNNEL_PID=$!
 
 # Wait for tunnel URL
@@ -77,14 +77,14 @@ sleep 1
 cd "$BACKEND_DIR"
 nohup "$VENV_PATH/bin/python" -m uvicorn api.main:app \
     --host 0.0.0.0 \
-    --port 8000 \
+    --port 8001 \
     >> "$BACKEND_LOG" 2>> "$BACKEND_ERROR_LOG" &
 BACKEND_PID=$!
 echo "$BACKEND_PID" > "$PID_FILE"
 
 # Wait for backend health
 for i in {1..30}; do
-    if curl -f -s http://localhost:8000/health/quick > /dev/null 2>&1; then
+    if curl -f -s http://localhost:8001/health/quick > /dev/null 2>&1; then
         break
     fi
     sleep 2

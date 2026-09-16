@@ -145,7 +145,7 @@ log_info "Launching uvicorn server..."
 cd "$BACKEND_DIR"
 nohup "$VENV_PATH/bin/python" -m uvicorn api.main:app \
     --host 0.0.0.0 \
-    --port 8000 \
+    --port 8001 \
     >> "$BACKEND_LOG" 2>> "$BACKEND_ERROR_LOG" &
 
 BACKEND_PID=$!
@@ -156,7 +156,7 @@ log_info "Backend started with PID: $BACKEND_PID"
 # Wait for backend to be healthy
 log_info "Waiting for backend to become healthy..."
 for i in {1..30}; do
-    if curl -f http://localhost:8000/health/quick > /dev/null 2>&1; then
+    if curl -f http://localhost:8001/health/quick > /dev/null 2>&1; then
         log_info "Backend is healthy"
         break
     fi
@@ -213,7 +213,7 @@ else
 fi
 
 # Check Backend
-if curl -f http://localhost:8000/health/quick > /dev/null 2>&1; then
+if curl -f http://localhost:8001/health/quick > /dev/null 2>&1; then
     log_info "✓ Backend: Running"
 else
     log_error "✗ Backend: Not responding"

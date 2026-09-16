@@ -78,12 +78,12 @@ echo ""
 
 # Check Backend Health
 echo -e "${YELLOW}Backend API:${NC}"
-if curl -f -s http://localhost:8000/health/quick > /dev/null 2>&1; then
-    echo -e "  ${GREEN}✓${NC} Backend API is responding (http://localhost:8000)"
+if curl -f -s http://localhost:8001/health/quick > /dev/null 2>&1; then
+    echo -e "  ${GREEN}✓${NC} Backend API is responding (http://localhost:8001)"
     BACKEND_HEALTHY=true
 
     # Get detailed health info if available
-    HEALTH_RESPONSE=$(curl -s http://localhost:8000/health/quick 2>/dev/null)
+    HEALTH_RESPONSE=$(curl -s http://localhost:8001/health/quick 2>/dev/null)
     if [ ! -z "$HEALTH_RESPONSE" ]; then
         echo -e "  ${GREEN}ℹ${NC}  Response: $HEALTH_RESPONSE"
     fi
@@ -137,9 +137,9 @@ if [ "$DOCKER_RUNNING" = true ] && [ "$QDRANT_HEALTHY" = true ] && [ "$BACKEND_H
     echo -e "  ${GREEN}✓ All services are running normally${NC}"
     echo ""
     echo "Services are accessible at:"
-    echo "  • Backend API:  http://localhost:8000"
+    echo "  • Backend API:  http://localhost:8001"
     echo "  • Qdrant:       http://localhost:6333"
-    echo "  • API Docs:     http://localhost:8000/docs"
+    echo "  • API Docs:     http://localhost:8001/docs"
     exit 0
 else
     echo -e "  ${RED}✗ Some services are not running properly${NC}"

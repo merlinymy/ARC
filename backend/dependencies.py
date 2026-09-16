@@ -114,6 +114,7 @@ class Dependencies:
                 claude_model=settings.claude_model,
                 claude_model_fast=settings.claude_model_fast,
                 claude_model_classifier=settings.claude_model_classifier,
+                claude_model_web_search=settings.claude_model_web_search,
                 enable_classification=settings.enable_query_classification,
                 enable_expansion=settings.enable_query_expansion,
                 enable_caching=True,

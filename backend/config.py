@@ -87,7 +87,7 @@ class Settings(BaseSettings):
 
     # API Settings
     api_host: str = "0.0.0.0"
-    api_port: int = 8000
+    api_port: int = 8001
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
 
     # Embedding Settings
@@ -96,13 +96,14 @@ class Settings(BaseSettings):
 
     # LLM Settings
     # Main model for answer generation
-    claude_model: str = "claude-opus-4-5-20251101"
+    claude_model: str = "claude-opus-5"
     # Fast model for HyDE, query rewriting, entity extraction, citation verification
-    claude_model_fast: str = "claude-haiku-4-5-20251001"
+    claude_model_fast: str = "claude-haiku-4-5"
     # Model for query classification (needs good reasoning but not full opus)
-    claude_model_classifier: str = "claude-sonnet-4-5-20250929"
+    claude_model_classifier: str = "claude-sonnet-5"
+    # Model for the server-side web search tool
+    claude_model_web_search: str = "claude-sonnet-5"
     max_tokens: int = 4096
-    temperature: float = 0.7
 
     model_config = {
         "env_file": ".env",

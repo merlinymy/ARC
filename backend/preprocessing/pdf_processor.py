@@ -27,10 +27,83 @@ import gc
 
 from .models import ChunkType, PaperMetadata, Chunk
 from .chunker import PaperChunker
+from . import paper_record as pr
 
 
-def _subprocess_mineru_extract(pdf_path_str: str, lang: str, use_gpu: bool, result_queue):
+def _mineru_version() -> str:
+    """Installed MinerU version. The package exposes no ``__version__``."""
+    try:
+        from importlib.metadata import version
+        return version("mineru")
+    except Exception:
+        return ""
+
+
+def _cross_page_map(pdf_info) -> Dict[Tuple[int, Tuple[int, ...]], int]:
+    """Find paragraphs MinerU merged across a page break.
+
+    ``para_split`` joins a paragraph that continues onto the next page into one
+    block, appends the continuation's lines, flags their spans ``cross_page``, and
+    keeps the block on the page where the paragraph *starts*.  Measured on a
+    40-paper sample, **15.3% of long body paragraphs are such merges** -- so
+    without this, a citation landing in a paragraph's tail resolves to the
+    previous page and the PDF highlight opens one page early.
+
+    Returns ``{(page_idx, scaled_bbox): chars_belonging_to_the_starting_page}``.
+    The key is the same scaled bbox ``make_blocks_to_content_list`` writes into
+    ``content_list``, which is what lets the two views be matched up.
+    """
+    from mineru.backend.pipeline.pipeline_middle_json_mkcontent import merge_para_with_text
+
+    out: Dict[Tuple[int, Tuple[int, ...]], int] = {}
+    for page in pdf_info or []:
+        page_idx = page.get("page_idx")
+        size = page.get("page_size") or []
+        if page_idx is None or len(size) != 2 or not size[0] or not size[1]:
+            continue
+        width, height = size
+        for block in page.get("para_blocks") or []:
+            lines = block.get("lines") or []
+            split = next(
+                (i for i, line in enumerate(lines)
+                 if any(s.get("cross_page") for s in line.get("spans") or [])),
+                None,
+            )
+            if not split:  # None, or the whole block is the continuation
+                continue
+            bbox = block.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            try:
+                full = merge_para_with_text(block)
+                head = merge_para_with_text({**block, "lines": lines[:split]})
+            except Exception:
+                continue
+            # Hyphen handling at the boundary looks at the following line, so the
+            # truncated render can differ by a character; take the common prefix.
+            n = 0
+            for a, b in zip(full, head):
+                if a != b:
+                    break
+                n += 1
+            if 0 < n < len(full):
+                key = (page_idx, (
+                    int(bbox[0] * 1000 / width), int(bbox[1] * 1000 / height),
+                    int(bbox[2] * 1000 / width), int(bbox[3] * 1000 / height),
+                ))
+                out[key] = n
+    return out
+
+
+def _subprocess_mineru_extract(pdf_path_str: str, lang: str, use_gpu: bool,
+                               paper_id: str, result_queue):
     """Run MinerU extraction in an isolated subprocess.
+
+    The **paper record is built here, inside the subprocess**, not reconstructed by
+    the parent afterwards.  MinerU's ``content_list`` and ``middle_json`` never
+    cross the process boundary, so the pdfium isolation of
+    docs/BUG_REPORT_pdfium_deadlock_2026-05-04.md is preserved and the structure
+    that W1 depends on is not lost on the way out.
 
     Must be a top-level function for multiprocessing pickling.
     """
@@ -61,29 +134,47 @@ def _subprocess_mineru_extract(pdf_path_str: str, lang: str, use_gpu: bool, resu
         markdown = union_make(pdf_info, MakeMode.MM_MD, tmp_dir)
         content_list = union_make(pdf_info, MakeMode.CONTENT_LIST, tmp_dir)
 
-        # Use a temporary extractor instance to call helper methods
-        extractor = MinerUExtractor.__new__(MinerUExtractor)
-        extractor.lang = lang
-        extractor.use_gpu = use_gpu
-        extractor._initialized = True
-
-        full_text = extractor._extract_text_from_content(content_list)
-        tables = extractor._extract_tables_from_content(content_list)
-        figures = extractor._extract_figures_from_content(content_list)
-        captions = extractor._extract_captions_from_markdown(markdown)
-        metadata = extractor._extract_metadata(pdf_path, middle_json)
+        record = pr.build_record(
+            content_list=content_list,
+            pdf_info=pdf_info,
+            paper_id=paper_id,
+            file_name=pdf_path.name,
+            pdf_path=pdf_path,
+            extractor_version=_mineru_version(),
+            cross_page_map=_cross_page_map(pdf_info),
+        )
 
         result_queue.put({
-            'full_text': full_text, 'markdown': markdown,
-            'tables': tables, 'figures': figures,
-            'captions': captions, 'metadata': metadata,
+            'full_text': pr.body_text(record),
+            'markdown': markdown,
+            'tables': pr.table_texts(record),
+            'figures': [
+                {
+                    'path': record['blocks'][f['block']].get('img_path', ''),
+                    'caption': ' '.join(record['blocks'][c]['text']
+                                        for c in f.get('caption_blocks', [])),
+                    'bbox': f['bbox'],
+                    'page_idx': f['page_idx'],
+                    'block': f['block'],
+                }
+                for f in record['figures']
+            ],
+            'captions': pr.captions(record),
+            'metadata': record['metadata'],
+            'record': record,
         })
 
 
-def _subprocess_fallback_extract(pdf_path_str: str, result_queue):
+def _subprocess_fallback_extract(pdf_path_str: str, paper_id: str, result_queue):
     """Run pypdfium2 fallback extraction in an isolated subprocess.
 
     Prevents PDFium native library state corruption in long-running processes.
+    Produces a **degraded** record: pypdfium2 gives interleaved two-column text
+    with no layout, so there are no captions, no tables and no headings to derive
+    sections from.  Per-page text and offsets are still real, so provenance down
+    to the page survives; the ``capabilities`` flags say what the record cannot
+    support instead of letting empty lists read as "this paper has no tables".
+
     Must be a top-level function for multiprocessing pickling.
     """
     import pypdfium2 as pdfium
@@ -93,22 +184,33 @@ def _subprocess_fallback_extract(pdf_path_str: str, result_queue):
     try:
         doc = pdfium.PdfDocument(pdf_path)
         text_parts = []
+        page_sizes = []
         for page_num in range(len(doc)):
             page = doc[page_num]
             textpage = page.get_textpage()
             text_parts.append(textpage.get_text_bounded())
             textpage.close()
+            try:
+                page_sizes.append((page.get_width(), page.get_height()))
+            except Exception:
+                page_sizes.append((0.0, 0.0))
+        record = pr.build_degraded_record(
+            page_texts=text_parts, paper_id=paper_id, file_name=pdf_path.name,
+            reason=pr.DEGRADED_FALLBACK, pdf_path=pdf_path, page_sizes=page_sizes,
+        )
         full_text = "\n\n".join(text_parts)
         result_queue.put({
             'full_text': full_text, 'markdown': full_text,
             'tables': [], 'figures': [], 'captions': [],
-            'metadata': {'title': pdf_path.stem, 'num_pages': len(doc), 'file_name': pdf_path.name},
+            'metadata': record['metadata'],
+            'record': record,
         })
     except Exception as e:
         logging.getLogger(__name__).error(f"Fallback extraction failed in subprocess: {e}")
+        record = pr.build_failed_record(paper_id, pdf_path.name, pdf_path=pdf_path)
         result_queue.put({
             'full_text': '', 'markdown': '', 'tables': [], 'figures': [], 'captions': [],
-            'metadata': {'title': pdf_path.stem, 'file_name': pdf_path.name, 'num_pages': 0},
+            'metadata': record['metadata'], 'record': record,
         })
     finally:
         if doc is not None:
@@ -143,13 +245,19 @@ class PDFChunk:
 
 @dataclass
 class MinerUContent:
-    """Parsed content from MinerU extraction."""
+    """Parsed content from MinerU extraction.
+
+    ``record`` is W1's paper record (see ``paper_record``).  The four flat fields
+    above it are views onto that record, kept so the existing chunker keeps
+    working unchanged; new code should read ``record``.
+    """
     full_text: str
     markdown: str
     tables: List[str]
     figures: List[Dict]
     captions: List[str]
     metadata: Dict
+    record: Optional[Dict[str, Any]] = None
 
 
 class MinerUExtractor:
@@ -185,24 +293,29 @@ class MinerUExtractor:
             logger.warning(f"MinerU initialization warning: {e}")
             self._initialized = True  # Continue anyway
 
-    def extract(self, pdf_path: Path) -> MinerUContent:
+    def extract(self, pdf_path: Path, paper_id: Optional[str] = None) -> MinerUContent:
         """Extract all content from a PDF using MinerU.
 
         Runs extraction in a subprocess to prevent PDFium native library
-        state corruption in long-running processes.
+        state corruption in long-running processes.  The paper record is built
+        inside that subprocess and returned with the content.
 
         Args:
             pdf_path: Path to PDF file
+            paper_id: Stable paper identifier. Defaults to ``md5(filename)[:12]``,
+                which W5's baseline depends on -- do not change the derivation.
 
         Returns:
-            MinerUContent with extracted text, tables, figures, etc.
+            MinerUContent with extracted text, tables, figures, and the record.
         """
         import queue
+
+        paper_id = paper_id or pr.paper_id_for_filename(pdf_path.name)
 
         result_queue = multiprocessing.Queue()
         proc = multiprocessing.Process(
             target=_subprocess_mineru_extract,
-            args=(str(pdf_path), self.lang, self.use_gpu, result_queue),
+            args=(str(pdf_path), self.lang, self.use_gpu, paper_id, result_queue),
         )
         proc.start()
 
@@ -229,7 +342,7 @@ class MinerUExtractor:
         result_queue = multiprocessing.Queue()
         proc = multiprocessing.Process(
             target=_subprocess_fallback_extract,
-            args=(str(pdf_path), result_queue),
+            args=(str(pdf_path), paper_id, result_queue),
         )
         proc.start()
 
@@ -248,80 +361,19 @@ class MinerUExtractor:
                 if proc.is_alive():
                     proc.kill()
 
+        # Neither extractor produced anything. Emit a record that is explicitly
+        # marked failed rather than an empty one that looks complete.
         return MinerUContent(
             full_text="", markdown="", tables=[], figures=[], captions=[],
             metadata={"title": pdf_path.stem, "file_name": pdf_path.name, "num_pages": 0},
+            record=pr.build_failed_record(paper_id, pdf_path.name, pdf_path=pdf_path),
         )
 
-    def _extract_with_mineru(self, pdf_path: Path) -> MinerUContent:
-        """Extract using MinerU pipeline."""
-        from mineru.cli.common import read_fn
-        from mineru.backend.pipeline.pipeline_analyze import doc_analyze
-        from mineru.backend.pipeline.model_json_to_middle_json import result_to_middle_json
-        from mineru.backend.pipeline.pipeline_middle_json_mkcontent import union_make
-        from mineru.data.data_reader_writer import FileBasedDataWriter
-        from mineru.utils.enum_class import MakeMode
-
-        try:
-            # Read PDF bytes
-            pdf_bytes = read_fn(pdf_path)
-
-            # Create temp directory for images
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                image_writer = FileBasedDataWriter(tmp_dir)
-
-                # Run document analysis
-                infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled = doc_analyze(
-                    [pdf_bytes],
-                    [self.lang],
-                    parse_method="auto",
-                    formula_enable=True,
-                    table_enable=True
-                )
-
-                # Convert to intermediate format
-                middle_json = result_to_middle_json(
-                    infer_results[0],
-                    all_image_lists[0],
-                    all_pdf_docs[0],
-                    image_writer,
-                    self.lang,
-                    ocr_enabled[0]
-                )
-
-                pdf_info = middle_json.get("pdf_info", [])
-
-                # Generate markdown and content list
-                markdown = union_make(pdf_info, MakeMode.MM_MD, tmp_dir)
-                content_list = union_make(pdf_info, MakeMode.CONTENT_LIST, tmp_dir)
-
-                # Extract components
-                full_text = self._extract_text_from_content(content_list)
-                tables = self._extract_tables_from_content(content_list)
-                figures = self._extract_figures_from_content(content_list)
-                captions = self._extract_captions_from_markdown(markdown)
-
-                # Extract metadata
-                metadata = self._extract_metadata(pdf_path, middle_json)
-
-                result = MinerUContent(
-                    full_text=full_text,
-                    markdown=markdown,
-                    tables=tables,
-                    figures=figures,
-                    captions=captions,
-                    metadata=metadata
-                )
-
-                # Clean up references to help with resource cleanup
-                del infer_results, all_image_lists, all_pdf_docs, middle_json
-                gc.collect()
-
-                return result
-        except Exception as e:
-            # Ensure cleanup on error
-            gc.collect()
-            raise
+    # NOTE: the in-process `_extract_with_mineru` and `_fallback_extract` variants
+    # were removed in W1. Both loaded pdfium into the long-running backend process,
+    # which is exactly the corruption described in
+    # docs/BUG_REPORT_pdfium_deadlock_2026-05-04.md. Extraction must go through the
+    # `_subprocess_*` functions above, which is also where the paper record is built.
 
     def _sanitize_text(self, text: str) -> str:
         """Remove invalid Unicode characters that can't be encoded to JSON.
@@ -348,19 +400,50 @@ class MinerUExtractor:
         return self._sanitize_text("\n".join(text_parts))
 
     def _extract_tables_from_content(self, content_list: List) -> List[str]:
-        """Extract tables from MinerU content list."""
+        """Extract tables from MinerU content list (R1).
+
+        MinerU's pipeline backend emits a table item as
+        ``{"type": "table", "table_body": "<table>...", "table_caption": [...],
+        "table_footnote": [...]}``.  This previously read ``item["latex"]`` or
+        ``item["text"]``; neither key is ever present, so it returned ``[]`` for
+        every paper in the corpus.  Verified against mineru 2.7.3
+        ``pipeline_middle_json_mkcontent.make_blocks_to_content_list``.
+        """
         tables = []
 
         for item in content_list:
-            if isinstance(item, dict):
-                item_type = item.get("type", "")
-                if item_type == "table":
-                    # MinerU outputs tables in LaTeX or markdown
-                    table_content = item.get("latex", "") or item.get("text", "")
-                    if table_content:
-                        tables.append(table_content)
+            if not isinstance(item, dict) or item.get("type") != "table":
+                continue
+            body = item.get("table_body", "") or ""
+            if not body:
+                continue
+            parts = [c for c in (item.get("table_caption") or []) if c]
+            parts.append(body)
+            parts += [f for f in (item.get("table_footnote") or []) if f]
+            tables.append(self._sanitize_text("\n".join(parts)))
 
         return tables
+
+    def _extract_captions_from_content(self, content_list: List) -> List[str]:
+        """Extract real captions from MinerU's caption lists (R2).
+
+        The regex this replaces ran ``finditer`` over the whole markdown, so every
+        in-text mention ("as shown in Figure 3, the peak...") became a caption --
+        93,144 pseudo-caption chunks, 44% of the index.  MinerU already separates
+        captions from body text; use its lists.
+        """
+        captions = []
+
+        for item in content_list:
+            if not isinstance(item, dict):
+                continue
+            for key in ("image_caption", "table_caption"):
+                for caption in item.get(key) or []:
+                    caption = (caption or "").strip()
+                    if caption:
+                        captions.append(self._sanitize_text(caption))
+
+        return captions
 
     def _extract_figures_from_content(self, content_list: List) -> List[Dict]:
         """Extract figure information from MinerU content list."""
@@ -379,24 +462,15 @@ class MinerUExtractor:
         return figures
 
     def _extract_captions_from_markdown(self, markdown: str) -> List[str]:
-        """Extract captions from markdown content."""
-        captions = []
+        """REMOVED (R2). Kept as a stub so no caller silently reverts to it.
 
-        # Patterns for detecting caption starts
-        caption_patterns = [
-            r'(?:Figure|Fig\.?)\s*(\d+[a-zA-Z]?)\s*[\.:\-–—]?\s*([^\n]+)',
-            r'Table\s*(\d+[a-zA-Z]?)\s*[\.:\-–—]?\s*([^\n]+)',
-            r'Scheme\s*(\d+[a-zA-Z]?)\s*[\.:\-–—]?\s*([^\n]+)',
-        ]
-
-        for pattern in caption_patterns:
-            matches = re.finditer(pattern, markdown, re.IGNORECASE)
-            for match in matches:
-                full_match = match.group(0).strip()
-                if len(full_match) >= 20:
-                    captions.append(full_match[:1000])
-
-        return list(set(captions))  # Deduplicate
+        The body-text caption regex is gone; use ``_extract_captions_from_content``
+        or ``paper_record.captions(record)``.
+        """
+        raise NotImplementedError(
+            "Caption extraction by regex over markdown was removed in W1 (R2). "
+            "Use paper_record.captions(record) or _extract_captions_from_content()."
+        )
 
     def _extract_metadata(self, pdf_path: Path, middle_json: Dict) -> Dict:
         """Extract metadata from PDF."""
@@ -417,54 +491,6 @@ class MinerUExtractor:
                     break
 
         return metadata
-
-    def _fallback_extract(self, pdf_path: Path) -> MinerUContent:
-        """Fallback extraction using basic pypdfium2."""
-        import pypdfium2 as pdfium
-
-        doc = None
-        try:
-            doc = pdfium.PdfDocument(pdf_path)
-            text_parts = []
-
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                textpage = page.get_textpage()
-                text_parts.append(textpage.get_text_bounded())
-                textpage.close()  # Close textpage to free resources
-
-            full_text = "\n\n".join(text_parts)
-
-            return MinerUContent(
-                full_text=full_text,
-                markdown=full_text,
-                tables=[],
-                figures=[],
-                captions=[],
-                metadata={
-                    "title": pdf_path.stem,
-                    "num_pages": len(doc),
-                    "file_name": pdf_path.name,
-                }
-            )
-        except Exception as e:
-            logger.error(f"Fallback extraction also failed: {e}")
-            return MinerUContent(
-                full_text="",
-                markdown="",
-                tables=[],
-                figures=[],
-                captions=[],
-                metadata={"title": pdf_path.stem, "file_name": pdf_path.name, "num_pages": 0}
-            )
-        finally:
-            # Always close the PDF document to prevent file descriptor leaks
-            if doc is not None:
-                try:
-                    doc.close()
-                except Exception:
-                    pass
-
 
 class PDFProcessor:
     """Process PDF files to extract text, tables, and images.
@@ -990,8 +1016,9 @@ class EnhancedPDFProcessor:
         """
         logger.info(f"Processing PDF: {pdf_path.name}")
 
-        # Extract content using MinerU
-        content = self.extractor.extract(pdf_path)
+        # Extract content using MinerU. The paper record is built inside the
+        # extraction subprocess and comes back attached to `content`.
+        content = self.extractor.extract(pdf_path, paper_id=paper_id)
         full_text = content.full_text
         meta = content.metadata
 
@@ -1049,13 +1076,35 @@ class EnhancedPDFProcessor:
             research_area=research_area,
         )
 
-        # Get tables and captions from MinerU extraction
+        # Persist the paper record. This is what makes every later chunking change
+        # cost minutes instead of a 60-80 h re-extraction (W1 item 6); W2, W3's
+        # long-context path and W5 all read it back from here.
+        record = content.record
+        if record is not None:
+            record["metadata"].update({
+                "title": title,
+                "authors": authors,
+                "year": year,
+                "journal": journal,
+                "doi": doi,
+                "project_tag": project_tag,
+                "research_area": research_area,
+            })
+            try:
+                path = pr.save_record(record)
+                logger.debug(f"Wrote paper record {path}")
+            except OSError as e:
+                logger.warning(f"Could not persist paper record for {paper_id}: {e}")
+
+        # Get tables and captions from the record (R1/R2). These are MinerU's own
+        # table bodies and caption lists, not regex scrapes of body prose.
         tables = content.tables
         captions = content.captions
 
         logger.debug(f"Extracted {len(tables)} tables, {len(captions)} captions from {pdf_path.name}")
 
-        # Create multi-type chunks
+        # Create multi-type chunks. The chunk contract itself is W2; this still
+        # calls the existing chunker, now fed with real structure.
         chunks = self.chunker.chunk_paper(
             text=full_text,
             metadata=paper_metadata,

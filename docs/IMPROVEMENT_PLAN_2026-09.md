@@ -281,7 +281,7 @@ R1, R2, R16, and the missing persistence. One new artifact, `processed_data/{pap
 Emit one structured record per paper from MinerU's `content_list`, with every block carrying `type`, `text`, `page_idx`, `bbox`, and a character offset. In the same pass:
 
 1. **Tables** — read `table_body`, attach `table_caption` / `table_footnote` (R1).
-2. **Captions** — use MinerU's `image_caption` / `table_caption` lists; delete the body-text regex (R2). Caption count should fall from 93k to **~49,000** (measured on the sample: 58.8% of the old regex's matches are mid-sentence body fragments, not captions). The earlier ~15–20k estimate was too aggressive.
+2. **Captions** — use MinerU's `image_caption` / `table_caption` lists; delete the body-text regex (R2). Caption count should fall from 93k to **~34,000** (W1 measured ~49,000; W2 cut it further by de-duplicating table captions, whose text a table chunk's span already contains verbatim) (measured on the sample: 58.8% of the old regex's matches are mid-sentence body fragments, not captions). The earlier ~15–20k estimate was too aggressive.
 3. **Equations and page text** — keep equation blocks and per-page text, both currently dropped. **Correction: the `content_list` type is `equation` (with `text` + `text_format: "latex"`), not `interline_equation`** — that is the `middle_json` block type.
 4. **Structural section and abstract detection (R16).** Derive section boundaries from MinerU's heading blocks instead of regex-matching raw lines, and take the abstract from the leading block sequence rather than `extract_abstract`'s pattern list. **Correction, measured 2026-09-15 across 50 papers: there is no `type: "title"` in `content_list`.** Headings arrive as `type: "text"` carrying a `text_level` key; `type: "title"` exists only in `middle_json['pdf_info'][i]['para_blocks']`. An earlier draft of this plan said otherwise, read from the existing code's `elif item_type == "title":` branch — which was itself dead, and part of why sections were broken. Keying on it would have found zero headings. `text_level` is also 1 for essentially every heading, so depth must come from the paper's own numbering. This is only possible *because* W1 builds the record — and it is what recovers the 14.6% of papers with no sections and the 54% with no abstract. Highest-leverage single item in W1 after the table fix.
 5. **The pypdfium2 fallback path (~3.1% of papers)** currently returns `tables=[]`, `captions=[]` and interleaved two-column text. It cannot produce a structured record, so mark those papers as degraded in the record and exclude them from claims about coverage rather than letting them silently look complete.
@@ -289,7 +289,7 @@ Emit one structured record per paper from MinerU's `content_list`, with every bl
 
 The record is simultaneously the substrate for citation offsets (§3b.1), the paper text for contextual retrieval (§3b.2), and the source for the long-context single-paper path (§3b.6). Build it once, correctly.
 
-### W2 — The chunk contract (~4 days, one reindex)
+### W2 — The chunk contract — **CODE COMPLETE 2026-09-16, reindex not yet run**
 
 R3, R4, R6, R13. Extend `Chunk` and `to_payload()` once, then reindex once.
 

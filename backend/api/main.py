@@ -460,6 +460,55 @@ class Source(BaseModel):
     chunk_type: str
     chunk_text: str
     relevance_score: float
+    # --- provenance (W2 positions) ---
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    # --- the figure this source *is*: a caption or table chunk ---
+    figure_id: Optional[str] = None
+    figure_kind: Optional[str] = None
+    figure_label: Optional[str] = None
+    figure_page: Optional[int] = None
+    figure_bbox: Optional[List[int]] = None
+    has_figure_image: bool = False
+    # --- figures this source *mentions*, offsets into `chunk_text` ---
+    figure_refs: List[Dict] = Field(default_factory=list)
+
+
+SOURCE_TEXT_LIMIT = 500
+
+
+def _source_payload(source: dict) -> dict:
+    """The API shape of one retrieved chunk.
+
+    ``chunk_text`` is truncated for the card, so ``figure_refs`` is clipped to
+    what survives: an offset past the end of the string the frontend receives
+    would render a link over the wrong characters.
+    """
+    text = source.get('text', '') or ''
+    truncated = len(text) > SOURCE_TEXT_LIMIT
+    shown = (text[:SOURCE_TEXT_LIMIT] + "...") if truncated else text
+    limit = SOURCE_TEXT_LIMIT if truncated else len(text)
+    refs = [r for r in (source.get('figure_refs') or [])
+            if isinstance(r, dict) and (r.get('end') or 0) <= limit]
+    return {
+        "paper_title": source.get('title', 'Unknown'),
+        "paper_id": source.get('paper_id', ''),
+        "section_name": source.get('section_name'),
+        "subsection_name": source.get('subsection_name'),
+        "chunk_type": source.get('chunk_type', 'unknown'),
+        "chunk_text": shown,
+        "relevance_score": _relevance_score(source),
+        "page_start": source.get('page_start'),
+        "page_end": source.get('page_end'),
+        "figure_id": source.get('figure_id'),
+        "figure_kind": source.get('figure_kind'),
+        "figure_label": source.get('figure_label'),
+        "figure_page": source.get('figure_page'),
+        "figure_bbox": source.get('figure_bbox'),
+        "has_figure_image": bool(source.get('has_figure_image')
+                                 or source.get('figure_image')),
+        "figure_refs": refs,
+    }
 
 
 class CitationCheck(BaseModel):
@@ -668,17 +717,7 @@ async def query_papers(
         )
 
         # Convert sources to API response format
-        sources = []
-        for source in result.sources:
-            sources.append(Source(
-                paper_title=source.get('title', 'Unknown'),
-                paper_id=source.get('paper_id', ''),
-                section_name=source.get('section_name'),
-                subsection_name=source.get('subsection_name'),
-                chunk_type=source.get('chunk_type', 'unknown'),
-                chunk_text=source.get('text', '')[:500] + "..." if len(source.get('text', '')) > 500 else source.get('text', ''),
-                relevance_score=_relevance_score(source),
-            ))
+        sources = [Source(**_source_payload(source)) for source in result.sources]
 
         # Convert citation checks to API format
         citation_checks = [
@@ -868,17 +907,7 @@ async def query_papers_stream(
                 ws_hash = hashlib.md5(result.web_search_answer.encode()).hexdigest()
                 logger.info(f"[STREAM] Result.web_search_answer length: {len(result.web_search_answer)} chars, MD5: {ws_hash}")
 
-            sources = []
-            for source in result.sources:
-                sources.append({
-                    "paper_title": source.get('title', 'Unknown'),
-                    "paper_id": source.get('paper_id', ''),
-                    "section_name": source.get('section_name'),
-                    "subsection_name": source.get('subsection_name'),
-                    "chunk_type": source.get('chunk_type', 'unknown'),
-                    "chunk_text": source.get('text', '')[:500] + "..." if len(source.get('text', '')) > 500 else source.get('text', ''),
-                    "relevance_score": _relevance_score(source),
-                })
+            sources = [_source_payload(source) for source in result.sources]
 
             # Convert citation checks to dict format for JSON
             citation_checks = [
@@ -1517,6 +1546,128 @@ async def get_paper_pdf(
     except Exception as e:
         logger.error(f"Failed to serve PDF for {paper_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error serving PDF: {str(e)}")
+
+
+class FigureInfo(BaseModel):
+    """One figure or table in a paper, addressable and (usually) renderable."""
+    figure_id: str
+    kind: str                              # "figure" | "table"
+    label: Optional[str] = None            # "Figure 3", "Table II"
+    label_source: Optional[str] = None     # caption | caption_fuzzy | sequence
+    page: Optional[int] = None             # 1-indexed
+    bbox: Optional[List[int]] = None       # per-mille of page, top-left origin
+    bbox_is_image: bool = False
+    caption: str = ""
+    footnote: str = ""
+    has_image: bool = False
+    image_url: Optional[str] = None
+    n_rows: Optional[int] = None
+    n_cols: Optional[int] = None
+
+
+class FigureListResponse(BaseModel):
+    paper_id: str
+    figures: List[FigureInfo]
+    total: int
+    #: False for a paper extracted before crops were persisted, or by the
+    #: pypdfium2 fallback. The UI uses it to explain an empty list instead of
+    #: implying the paper has no figures.
+    images_available: bool
+    schema_version: Optional[int] = None
+
+
+def _load_paper_record(paper_id: str) -> dict:
+    from preprocessing import paper_record as pr
+
+    record = pr.load_record(paper_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No extraction record for paper {paper_id}. "
+                   "Figures are available for papers extracted after W1.",
+        )
+    return record
+
+
+@app.get("/papers/{paper_id}/figures", response_model=FigureListResponse)
+async def list_paper_figures(paper_id: str):
+    """List a paper's figures and tables.
+
+    Reads the persisted paper record -- no PDF re-parsing, no model call.  Each
+    entry carries the page and rectangle to highlight and, when a crop was
+    persisted, a URL to fetch it.
+    """
+    from preprocessing import paper_record as pr
+
+    record = _load_paper_record(paper_id)
+    objects = pr.figure_objects(record)
+    figures = []
+    for entry in objects:
+        image = pr.asset_path(paper_id, entry.get("img_path"))
+        figures.append(FigureInfo(
+            figure_id=entry["figure_id"],
+            kind=entry["kind"],
+            label=entry.get("label"),
+            label_source=entry.get("label_source"),
+            page=entry.get("page"),
+            bbox=entry.get("bbox"),
+            bbox_is_image=bool(entry.get("bbox_is_image")),
+            caption=entry.get("caption") or "",
+            footnote=entry.get("footnote") or "",
+            has_image=image is not None,
+            image_url=(f"/papers/{paper_id}/figures/{entry['figure_id']}/image"
+                       if image is not None else None),
+            n_rows=entry.get("n_rows"),
+            n_cols=entry.get("n_cols"),
+        ))
+    return FigureListResponse(
+        paper_id=paper_id,
+        figures=figures,
+        total=len(figures),
+        images_available=any(f.has_image for f in figures),
+        schema_version=record.get("schema_version"),
+    )
+
+
+@app.get("/papers/{paper_id}/figures/{figure_id}/image")
+async def get_paper_figure_image(paper_id: str, figure_id: str,
+                                 download: bool = False):
+    """Serve one figure or table crop.
+
+    Mirrors ``/papers/{paper_id}/pdf``: a ``FileResponse``, inline by default.
+    ``figure_id`` is the record's handle (``figure_3``, ``table_1``), so the
+    path is resolved through the record rather than from the URL -- a client
+    cannot name a file, only an object.
+    """
+    from preprocessing import paper_record as pr
+
+    record = _load_paper_record(paper_id)
+    entry = pr.figure_object(record, figure_id)
+    if entry is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No figure {figure_id} in paper {paper_id}")
+    path = pr.figure_image(record, entry)
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No persisted crop for {figure_id} in paper {paper_id}"
+                   + (" (extracted before crops were persisted)"
+                      if record.get("schema_version", 1) < 2 else ""),
+        )
+    media = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+             ".png": "image/png", ".webp": "image/webp"}.get(
+                 path.suffix.lower(), "application/octet-stream")
+    disposition = "attachment" if download else "inline"
+    return FileResponse(
+        path=path,
+        media_type=media,
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{figure_id}{path.suffix}"',
+            # Content-hashed filename behind a stable id: the bytes for a given
+            # (paper, figure) only change on re-extraction.
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
 
 
 @app.delete("/papers/{paper_id}", response_model=DeleteResponse)

@@ -29,7 +29,7 @@ from dependencies import (
     get_paper_library_service,
 )
 from qdrant_client import QdrantClient
-from retrieval.query_engine import QueryEngine, SYSTEM_PROMPTS_CONCISE, SYSTEM_PROMPTS_DETAILED, GENERAL_KNOWLEDGE_ADDENDUM, WEB_SEARCH_SYSTEM_PROMPT, PDF_UPLOAD_ADDENDUM
+from retrieval.query_engine import QueryEngine, EFFORT_LEVELS, SYSTEM_PROMPTS_CONCISE, SYSTEM_PROMPTS_DETAILED, GENERAL_KNOWLEDGE_ADDENDUM, WEB_SEARCH_SYSTEM_PROMPT, PDF_UPLOAD_ADDENDUM
 from retrieval.query_classifier import QueryType
 from retrieval.qdrant_store import QdrantStore
 from services.paper_library import PaperLibraryService
@@ -351,11 +351,9 @@ class QueryRequest(BaseModel):
         le=100,
         description="Number of results to retrieve"
     )
-    temperature: float = Field(
-        default=0.7,
-        ge=0.0,
-        le=2.0,
-        description="LLM temperature for response generation"
+    effort: str = Field(
+        default="high",
+        description="How much care to spend on the answer. One of: low, medium, high, xhigh, max"
     )
     paper_ids: Optional[List[str]] = Field(
         default=None,
@@ -411,6 +409,24 @@ class QueryRequest(BaseModel):
         if v not in valid_modes:
             raise ValueError(f"response_mode must be one of {valid_modes}, got '{v}'")
         return v
+
+    @field_validator('effort')
+    @classmethod
+    def validate_effort(cls, v: str) -> str:
+        if v not in EFFORT_LEVELS:
+            raise ValueError(f"effort must be one of {list(EFFORT_LEVELS)}, got '{v}'")
+        return v
+
+
+def _relevance_score(source: dict) -> float:
+    """Displayed relevance: the reranker's score, falling back to vector similarity.
+
+    `rerank_score` is absent when reranking was skipped or failed.
+    """
+    score = source.get('rerank_score')
+    if score is None:
+        score = source.get('score', 0.0)
+    return float(score)
 
 
 class Source(BaseModel):
@@ -596,7 +612,7 @@ async def query_papers(
     """
     try:
         # Log received query options
-        logger.info(f"Query request received - top_k: {request.top_k}, temperature: {request.temperature}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
+        logger.info(f"Query request received - top_k: {request.top_k}, effort: {request.effort}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
 
         # Fetch user's custom prompts if authenticated
         custom_prompts = None
@@ -614,7 +630,8 @@ async def query_papers(
             paper_ids=request.paper_ids,
             max_chunks_per_paper=request.max_chunks_per_paper,
             top_k=request.top_k,
-            temperature=request.temperature,
+            effort=request.effort,
+            conversation_id=request.conversation_id,
             query_type_override=request.query_type,
             enable_hyde_override=request.enable_hyde,
             enable_expansion_override=request.enable_expansion,
@@ -636,7 +653,7 @@ async def query_papers(
                 subsection_name=source.get('subsection_name'),
                 chunk_type=source.get('chunk_type', 'unknown'),
                 chunk_text=source.get('text', '')[:500] + "..." if len(source.get('text', '')) > 500 else source.get('text', ''),
-                relevance_score=source.get('score', 0.0),
+                relevance_score=_relevance_score(source),
             ))
 
         # Convert citation checks to API format
@@ -738,7 +755,7 @@ async def query_papers_stream(
     persisted to the database for chat history.
     """
     # Log received query options for streaming endpoint
-    logger.info(f"Stream query request - top_k: {request.top_k}, temperature: {request.temperature}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
+    logger.info(f"Stream query request - top_k: {request.top_k}, effort: {request.effort}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
 
     # Fetch user's custom prompts if authenticated (before generator to avoid async issues)
     custom_prompts = None
@@ -767,7 +784,8 @@ async def query_papers_stream(
                     paper_ids=request.paper_ids,
                     max_chunks_per_paper=request.max_chunks_per_paper,
                     top_k=request.top_k,
-                    temperature=request.temperature,
+                    effort=request.effort,
+                    conversation_id=request.conversation_id,
                     progress_callback=progress_callback,
                     query_type_override=request.query_type,
                     enable_hyde_override=request.enable_hyde,
@@ -826,7 +844,7 @@ async def query_papers_stream(
                     "subsection_name": source.get('subsection_name'),
                     "chunk_type": source.get('chunk_type', 'unknown'),
                     "chunk_text": source.get('text', '')[:500] + "..." if len(source.get('text', '')) > 500 else source.get('text', ''),
-                    "relevance_score": source.get('score', 0.0),
+                    "relevance_score": _relevance_score(source),
                 })
 
             # Convert citation checks to dict format for JSON
@@ -978,9 +996,15 @@ async def get_stats(
 
 
 @app.post("/conversation/clear")
-async def clear_conversation(query_engine: QueryEngine = Depends(get_query_engine)):
+async def clear_conversation(
+    conversation_id: Optional[str] = Query(
+        default=None,
+        description="Conversation to reset. Omit to clear memory for every conversation."
+    ),
+    query_engine: QueryEngine = Depends(get_query_engine),
+):
     """Clear conversation memory to start a fresh session."""
-    query_engine.clear_conversation()
+    query_engine.clear_conversation(conversation_id)
     return {"status": "ok", "message": "Conversation memory cleared"}
 
 
@@ -2092,7 +2116,7 @@ class UserPreferencesResponse(BaseModel):
     """Response model for user preferences."""
     query_type: str = "auto"
     top_k: int = 15
-    temperature: float = 0.3
+    effort: str = "high"
     max_chunks_per_paper: Optional[int] = None  # None = auto
     response_mode: str = "detailed"
     enable_hyde: bool = True
@@ -2106,7 +2130,7 @@ class UserPreferencesRequest(BaseModel):
     """Request model for updating user preferences."""
     query_type: Optional[str] = None
     top_k: Optional[int] = None
-    temperature: Optional[float] = None
+    effort: Optional[str] = None
     max_chunks_per_paper: Optional[int] = None
     response_mode: Optional[str] = None
     enable_hyde: Optional[bool] = None
@@ -2114,6 +2138,13 @@ class UserPreferencesRequest(BaseModel):
     enable_citation_check: Optional[bool] = None
     enable_general_knowledge: Optional[bool] = None
     enable_web_search: Optional[bool] = None
+
+    @field_validator('effort')
+    @classmethod
+    def validate_effort(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in EFFORT_LEVELS:
+            raise ValueError(f"effort must be one of {list(EFFORT_LEVELS)}, got '{v}'")
+        return v
 
 
 @app.get("/user/preferences", response_model=UserPreferencesResponse)
@@ -2134,7 +2165,7 @@ async def get_user_preferences(
     return UserPreferencesResponse(
         query_type=prefs.query_type,
         top_k=prefs.top_k,
-        temperature=prefs.temperature,
+        effort=prefs.effort,
         max_chunks_per_paper=prefs.max_chunks_per_paper,
         response_mode=prefs.response_mode,
         enable_hyde=prefs.enable_hyde,
@@ -2167,8 +2198,8 @@ async def update_user_preferences(
         prefs.query_type = request.query_type
     if request.top_k is not None:
         prefs.top_k = request.top_k
-    if request.temperature is not None:
-        prefs.temperature = request.temperature
+    if request.effort is not None:
+        prefs.effort = request.effort
     if request.max_chunks_per_paper is not None:
         prefs.max_chunks_per_paper = request.max_chunks_per_paper
     if request.response_mode is not None:
@@ -2192,7 +2223,7 @@ async def update_user_preferences(
     return UserPreferencesResponse(
         query_type=prefs.query_type,
         top_k=prefs.top_k,
-        temperature=prefs.temperature,
+        effort=prefs.effort,
         max_chunks_per_paper=prefs.max_chunks_per_paper,
         response_mode=prefs.response_mode,
         enable_hyde=prefs.enable_hyde,

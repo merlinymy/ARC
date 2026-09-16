@@ -149,7 +149,10 @@ class UserPreferences(Base):
     # Query options
     query_type: Mapped[str] = mapped_column(String(20), default="auto")
     top_k: Mapped[int] = mapped_column(Integer, default=15)
+    # Retained for historical rows only - superseded by `effort`, no longer read
     temperature: Mapped[float] = mapped_column(default=0.3)
+    # Answer depth: low | medium | high | xhigh | max
+    effort: Mapped[str] = mapped_column(String(10), default="high")
     max_chunks_per_paper: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # None = auto
     response_mode: Mapped[str] = mapped_column(String(20), default="detailed")
     enable_hyde: Mapped[bool] = mapped_column(default=True)

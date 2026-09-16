@@ -20,6 +20,7 @@ import time
 from collections import OrderedDict
 from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass, field
+from enum import Enum
 
 from anthropic import Anthropic, RateLimitError, APIStatusError
 
@@ -56,17 +57,27 @@ ADAPTIVE_THINKING = {"type": "adaptive", "display": "summarized"}
 
 # Prompt caching. Breakpoints only create an entry when the prefix that precedes
 # them is at least the model's minimum cacheable length; below it the API returns
-# cache_creation_input_tokens == 0 with no error.  Measured with
-# messages.count_tokens against the prompts in this module (Opus 5 floor = 512):
+# cache_creation_input_tokens == 0 with no error.
 #
-#   system prompt              concise        detailed
-#   base only                   57- 108  tok   158- 295 tok   <- never cacheable
-#   base + general knowledge   383- 434  tok   484- 621 tok   <- 6/8 detailed types
-#   base + pdf upload          477- 528  tok   578- 715 tok
-#   base + both                803- 854  tok   926-1041 tok   <- always cacheable
+# Re-measured 2026-09-15 with messages.count_tokens after the 16 query-type
+# prompts were replaced by one base prompt plus a stance modifier (Opus 5 floor
+# = 512; figures below include 7 tokens of request overhead):
 #
-# So the breakpoint has to sit on the *last* system block, not after the stable
-# base: no base prompt in this file reaches 512 tokens on its own.
+#   stance-independent prefix              concise   detailed
+#   base only (both addendums off)             867        889
+#   base + general knowledge  <- default      1019       1041
+#   base + pdf upload                         1032       1054
+#   base + both addendums                     1184       1206
+#
+#   stance block alone                     106 (ask) .. 179 (critique)
+#
+# The old table said no base prompt reached 512 tokens on its own, so the only
+# useful breakpoint was the last system block. That is no longer true: the base
+# prompt now carries the invariants and clears the floor by itself in every
+# configuration. So there are two system breakpoints - one on the last block
+# (whole system prompt) and one on the block before the stance, so that flipping
+# stance mid-conversation reads the ~870-1200 token prefix instead of rewriting
+# it. Ordering the stance last is what makes that prefix stance-independent.
 CACHE_CONTROL_EPHEMERAL: Dict[str, str] = {"type": "ephemeral"}
 
 # The API rejects a request carrying more than four cache_control markers.
@@ -225,6 +236,10 @@ class QueryResult:
     retrieval_count: int
     reranked_count: int
     # New fields for advanced features
+    # Response stance the answer was generated under - an AnswerMode value.
+    # Literal rather than DEFAULT_ANSWER_MODE.value because AnswerMode is
+    # defined below this dataclass.
+    mode: str = "ask"
     rewritten_query: str = ""
     used_hyde: bool = False
     cache_hit: bool = False
@@ -239,231 +254,123 @@ class QueryResult:
     web_search_sources: List[Dict[str, str]] = field(default_factory=list)
 
 
-# Query-type-specific system prompts with concise and detailed variants
-# Each query type has two modes: "concise" (brief, focused) and "detailed" (comprehensive, in-depth)
+# ---------------------------------------------------------------------------
+# Answer prompts: one base prompt plus a user-selected stance
+# ---------------------------------------------------------------------------
+#
+# This replaces 8 query types x 2 response modes = 16 hand-written prompts, each
+# of which mandated a numbered report scaffold ("1. Background & Context,
+# 2. Key Findings, 3. Methodology Highlights..."). Measured consequence: a
+# 5,161-character average assistant message against a 344-character average
+# question, opening "## Answer from the Uploaded Sources". See
+# docs/IMPROVEMENT_PLAN_2026-09.md section 4b (R12, requests 7 and 8).
+#
+# Four axes, now orthogonal:
+#   BASE_SYSTEM_PROMPT  invariants - cite, ground, admit gaps, keep every number
+#   ANSWER_STANCES      what kind of response the user asked for (AnswerMode)
+#   LENGTH_DIAL         how much room the answer may take (response_mode)
+#   output_config.effort  how much thinking the model spends (not a prompt)
+#
+# `QueryType` still exists and still drives RETRIEVAL_STRATEGIES. It no longer
+# selects a prompt: retrieval is a retrieval concern, stance is a generation
+# concern, and conflating them is what produced the book-report voice.
 
-SYSTEM_PROMPTS_CONCISE = {
-    QueryType.FACTUAL: """You are a research assistant answering factual questions about scientific literature.
 
-Based on the retrieved sources, provide a direct, accurate answer to the question.
-Include specific values, definitions, or mechanisms when available.
-Keep your response focused and concise.
-Cite sources using [Source N] format.""",
+class AnswerMode(str, Enum):
+    """The stance the user picked for this turn - what kind of reply they want.
 
-    QueryType.FRAMING: """You are a research writing strategist helping position research for publication.
+    Orthogonal to QueryType (which chunks to retrieve) and to effort (how hard
+    the model thinks).
+    """
 
-Based on the retrieved literature, provide STRATEGIC ADVICE on how to frame and position the research.
-Focus on key differentiating factors and positioning language.
+    ASK = "ask"                # answer the question
+    BRAINSTORM = "brainstorm"  # generate possibilities and directions
+    DEVELOP = "develop"        # take a stated idea and build it out
+    REFINE = "refine"          # tighten an existing idea, sharpen the framing
+    CRITIQUE = "critique"      # argue against it, find the weaknesses
+    DRAFT = "draft"            # start turning it into writing
 
-End with a brief "## Recommended Positioning Framework" section.
-Cite sources using [Source N] format.""",
 
-    QueryType.METHODS: """You are a research methods expert helping with technical writing.
+DEFAULT_ANSWER_MODE = AnswerMode.ASK
+ANSWER_MODES = tuple(m.value for m in AnswerMode)
 
-Based on the retrieved methods sections, provide technical guidance on protocols and procedures.
-Include key details like reagents, conditions, and equipment.
-Keep your response focused on the essential steps.
-Cite sources using [Source N] format.""",
 
-    QueryType.SUMMARY: """You are a research assistant summarizing scientific literature.
+def coerce_answer_mode(value: Optional[str]) -> AnswerMode:
+    """Map an arbitrary string onto an AnswerMode, defaulting to Ask."""
+    if not value:
+        return DEFAULT_ANSWER_MODE
+    try:
+        return AnswerMode(value.strip().lower())
+    except ValueError:
+        logger.warning("Unknown answer mode %r, falling back to %s", value, DEFAULT_ANSWER_MODE.value)
+        return DEFAULT_ANSWER_MODE
 
-Based on the retrieved content, provide a concise summary of the key findings.
-Focus on major results and conclusions.
-Cite sources using [Source N] format.""",
 
-    QueryType.COMPARATIVE: """You are a research analyst comparing approaches across the literature.
+# The invariants. Everything that must hold no matter which stance is selected.
+# Rules 2 and 3 are the resolution of conflict C3 in the plan: request 7 wants
+# conversational brevity, request 3 wants every number kept with its provenance.
+# Brevity removes scaffolding, never data.
+BASE_SYSTEM_PROMPT = """You are a research assistant working over a scientist's own library of papers. Talk to them the way a colleague at the next bench would - directly, in prose, assuming they know their field. Not like a student handing in a report.
 
-Based on the retrieved sources, briefly compare and contrast the different approaches.
-Highlight key similarities and differences.
-Cite sources using [Source N] format.""",
+Ground rules, in priority order:
 
-    QueryType.NOVELTY: """You are a research strategist assessing novelty and contribution.
+1. Lead with the answer. The first sentence answers the question. No preamble, no restating the question back, no "Based on the retrieved sources", no "## Answer from the Uploaded Sources" heading. Just the answer.
 
-Based on the retrieved literature, briefly assess what aspects might be novel.
-Identify key gaps and potential contributions.
-Cite sources using [Source N] format.""",
+2. Keep every number. Concentrations, ranges, equivalents, molar ratios, temperatures, times, yields, pH, solvent ratios, molecular weights, IC50s, detection limits, error bars - if a source gives a value that bears on the question, it goes in your answer with its unit and its [Source N]. Report values exactly as the source gives them: do not round them, average them across sources, or replace them with a vaguer statement like "low micromolar". When you are unsure whether a value bears on the question, include it - a number costs one clause, and leaving it out is the one failure this tool cannot afford. This precision is the most valuable thing you do.
 
-    QueryType.LIMITATIONS: """You are a research writing assistant helping discuss limitations.
+3. Brevity means cutting scaffolding, not data. Cut: section headings, numbered outlines, restatement, hedging, throat-clearing, "it is worth noting", recaps of what you just said, and offers to elaborate further. Never cut: numbers, units, conditions, the caveats that actually change the answer, or citations. An answer that got shorter by dropping a concentration range has failed, not succeeded.
 
-Based on how limitations are discussed in similar literature, briefly frame constraints and caveats.
-Focus on the most important limitations.
-Cite sources using [Source N] format.""",
+4. Cite as you go. Put [Source N] on the specific claim it supports, inline, not parked at the end of a paragraph.
 
-    QueryType.GENERAL: """You are a research assistant helping with questions about scientific literature.
+5. When the library does not cover it, say so in a sentence or two and stop. "Nothing in your library addresses X directly - [Source 3] is the closest and only covers Y." Do not write five paragraphs around an absence. Naming what would answer it is useful; padding is not.
 
-Based on the retrieved sources, provide a focused answer to the question.
-Cite sources using [Source N] format.""",
+6. Length follows the question, not a setting. A one-line question gets a one-line answer. A question that genuinely spans five papers gets the room the evidence needs and not a word more.
+
+7. Structure only when the content is structured. Prose by default. A list when you are genuinely listing parallel items - three solvents, four conditions. A table when you are genuinely comparing the same measured quantity across papers. Never impose a section scaffold on a two-sentence answer.
+
+8. Sources that disagree are information. Give both values with both citations and name the condition that differs, rather than smoothing it into a range."""
+
+
+# response_mode is a length dial and nothing else - it no longer selects a
+# prompt. It cannot override rules 1-8; it only widens or narrows the room.
+LENGTH_DIAL: Dict[str, str] = {
+    "concise": """Room: tight. Answer, evidence, stop. If the whole answer is one sentence carrying two numbers and two citations, that is the right answer.""",
+    "detailed": """Room: you may explain mechanism, conditions, and where sources disagree, when that genuinely helps. More room is not permission to add headings, outlines, or restatement - rules 1, 3 and 7 still hold.""",
+}
+DEFAULT_RESPONSE_MODE = "detailed"
+
+
+# The stance modifiers. Each is composed onto BASE_SYSTEM_PROMPT; none of them
+# repeats an invariant, and none of them may relax one.
+ANSWER_STANCES: Dict[AnswerMode, str] = {
+    AnswerMode.ASK: """Stance - Ask. Answer the question. That is the whole job. If the answer is "1 M NaOH, adjusted to pH 8.0 [Source 2]", say that and stop; do not build a report around a one-line fact. Follow-up context is welcome only when it changes what the scientist would actually do.""",
+
+    AnswerMode.BRAINSTORM: """Stance - Brainstorm. They want possibilities, not a summary of the literature. Generate concrete directions grounded in what the library actually shows: what has been tried and at what conditions [Source N], what has not, what an adjacent system does that could transfer here, what the obvious next experiment is. A handful of specific, testable ideas beats an exhaustive taxonomy. Mark clearly which ideas the library supports and which are your extrapolation beyond it.""",
+
+    AnswerMode.DEVELOP: """Stance - Develop. They have an idea and want it built out. Take it seriously and push it forward: what it would take to make it work, which pieces the library already establishes and at which values [Source N], what has to be decided, where the unknowns sit. Add substance, not affirmation - do not spend lines telling them the idea is promising. Where a step has no support in the library, say so plainly instead of papering over it.""",
+
+    AnswerMode.REFINE: """Stance - Refine. They have an idea and want it sharpened, not expanded. Tighten the framing: what exactly is being claimed, what the minimal defensible version is, which words are doing work and which are filler. Offer a sharper restatement of the idea itself, in their voice. Cut scope the library does not support. Your output should be shorter and harder-edged than the input, not longer.""",
+
+    AnswerMode.CRITIQUE: """Stance - Critique. Argue against it. Take the reviewer's seat and find what breaks: unsupported steps, missing controls, confounds, alternative explanations, prior work that already did this or already failed at it [Source N], numbers that will not carry the claim being hung on them. Be specific, cite, and quantify the objection wherever the library lets you. Do not balance this with praise - they asked for the weaknesses, and a critique that opens by saying what is great is a wasted turn. If something genuinely holds up, one line is enough.""",
+
+    AnswerMode.DRAFT: """Stance - Draft. Start turning this into writing: an outline, a section, a paragraph, a set of specific aims - whichever they asked for. Produce the actual prose, not advice about how to write it. Carry [Source N] citations inline so they can be resolved later, and carry every number into the draft. Match the register of the target: aims are terse and declarative, a discussion paragraph argues, a methods paragraph is procedural and keeps every concentration, equivalent and temperature.""",
 }
 
-SYSTEM_PROMPTS_DETAILED = {
-    QueryType.FACTUAL: """You are a research assistant answering factual questions about scientific literature.
 
-Based on the retrieved sources, provide a comprehensive, accurate answer to the question.
-Include:
-- Specific values, definitions, and mechanisms with full context
-- Background information that helps understand the answer
-- Multiple perspectives or values if sources differ
-- Relevant caveats or conditions that affect the answer
+# General knowledge addendum for when enable_general_knowledge is True.
+# Rewritten alongside the base prompt: the old version mandated a
+# "## Additional Context (General Knowledge)" section, which is where the
+# "## Direct Answer from the Retrieved Sources" style preamble came from.
+GENERAL_KNOWLEDGE_ADDENDUM = """You may also draw on your own scientific knowledge beyond the retrieved sources.
 
-Explain the significance and implications where relevant.
-Cite sources using [Source N] format throughout your response.""",
+Answer from the library first, cited. Where your own knowledge adds something the library does not have, add it inline and mark it in the sentence itself - "not in your library, but standard practice is...", "no paper here reports it; generally...". Marking it in the sentence is enough: do not open a separate section or heading for it, and do not restate the library answer inside it.
 
-    QueryType.FRAMING: """You are a research writing strategist helping position research for publication.
-
-Based on the retrieved literature, provide COMPREHENSIVE STRATEGIC ADVICE on how to frame and position the research.
-
-Cover these aspects in depth:
-- Rhetorical strategies and positioning language used by successful papers
-- How to articulate the unique value proposition with specific examples
-- Key differentiating factors to emphasize and why they matter
-- Language patterns and phrases from successful papers you can adapt
-- Common pitfalls to avoid in framing
-- How different journals/audiences might respond to different framings
-
-IMPORTANT: End your response with a detailed "## Recommended Positioning Framework" section that provides:
-1. Suggested narrative arc
-2. Key claims to emphasize
-3. Specific language recommendations
-4. Positioning relative to existing literature
-
-Cite sources using [Source N] format throughout your response.""",
-
-    QueryType.METHODS: """You are a research methods expert helping with technical writing.
-
-Based on the retrieved methods sections, provide comprehensive technical guidance on protocols and procedures.
-
-Include detailed information on:
-- Step-by-step protocols with all relevant parameters
-- Specific reagents, concentrations, and preparation details
-- Equipment specifications and settings
-- Timing, temperatures, and critical conditions
-- Controls and validation steps
-- Common variations across different papers
-- Tips for reproducibility and troubleshooting
-- Quality control checkpoints
-
-Explain the rationale behind key methodological choices where evident from the sources.
-Cite sources using [Source N] format throughout your response.""",
-
-    QueryType.SUMMARY: """You are a research assistant summarizing scientific literature.
-
-Based on the retrieved content, provide a comprehensive, structured summary covering:
-
-1. **Background & Context**: The research landscape and why this work matters
-2. **Key Findings**: Major results with specific data points and statistics
-3. **Methodology Highlights**: How key findings were obtained
-4. **Implications**: What these findings mean for the field
-5. **Connections**: How different findings relate to each other
-6. **Open Questions**: What remains to be addressed
-
-Organize the information logically and explain the significance of findings.
-Cite sources using [Source N] format throughout your response.""",
-
-    QueryType.COMPARATIVE: """You are a research analyst comparing approaches across the literature.
-
-Based on the retrieved sources, provide a thorough comparison covering:
-
-1. **Overview of Approaches**: Brief description of each approach/method being compared
-2. **Key Similarities**: What the approaches share in common
-3. **Important Differences**: Where they diverge and why
-4. **Trade-offs**: Advantages and disadvantages of each approach
-5. **Context-Dependent Recommendations**: When each approach might be preferred
-6. **Performance Metrics**: Quantitative comparisons where available
-7. **Practical Considerations**: Implementation complexity, resource requirements, etc.
-
-Use tables or structured formats where helpful for clarity.
-Cite sources using [Source N] format throughout your response.""",
-
-    QueryType.NOVELTY: """You are a research strategist assessing novelty and contribution.
-
-Based on the retrieved literature, provide a comprehensive assessment covering:
-
-1. **Prior Art Summary**: What has been done before in this area
-2. **Gap Analysis**: What hasn't been addressed or remains unresolved
-3. **Potential Novel Contributions**: Aspects that could be claimed as new
-4. **Strength of Novelty Claims**: How defensible each potential contribution is
-5. **Differentiation Strategy**: How to position work relative to existing literature
-6. **Risk Assessment**: Potential challenges to novelty claims
-7. **Supporting Evidence**: What evidence from literature supports your assessment
-
-Be specific about what has and hasn't been done, with citations.
-Cite sources using [Source N] format throughout your response.""",
-
-    QueryType.LIMITATIONS: """You are a research writing assistant helping discuss limitations.
-
-Based on how limitations are discussed in similar literature, provide comprehensive guidance on:
-
-1. **Common Limitations**: What limitations are typically acknowledged in this area
-2. **How to Frame Each Limitation**: Language and approaches that maintain credibility
-3. **Mitigation Strategies**: How papers address or contextualize their limitations
-4. **Balancing Act**: How to be honest without undermining your work
-5. **Field-Specific Conventions**: What's expected in this research area
-6. **Reviewer Anticipation**: Limitations reviewers are likely to raise
-7. **Future Work Connections**: How to turn limitations into future directions
-
-Include specific examples of effective limitation discussions from the sources.
-Cite sources using [Source N] format throughout your response.""",
-
-    QueryType.GENERAL: """You are a research assistant helping with questions about scientific literature.
-
-Based on the retrieved sources, provide a comprehensive and well-organized answer to the question.
-
-Structure your response to:
-- Address all aspects of the question thoroughly
-- Provide relevant background context
-- Include specific details, data points, and examples
-- Explain connections between different pieces of information
-- Note any important caveats or nuances
-- Suggest related topics or follow-up questions if relevant
-
-Draw on all relevant information from the sources.
-Cite sources using [Source N] format throughout your response.""",
-}
-
-# General knowledge addendum for when enable_general_knowledge is True
-GENERAL_KNOWLEDGE_ADDENDUM = """
-
----
-IMPORTANT: General Knowledge Mode is ENABLED.
-
-In addition to the retrieved sources, you may draw on your general scientific knowledge to provide a more complete answer. However, you MUST follow this structure:
-
-**CRITICAL: ALWAYS start your response by answering based on the retrieved sources with [Source N] citations. NEVER skip the RAG citations.**
-
-1. FIRST: Answer the question using ONLY the retrieved sources. Cite every claim with [Source N] format.
-2. THEN: After fully addressing the question with source citations, you may add:
-
-## Additional Context (General Knowledge)
-
-In this section, clearly indicate that this information comes from your general training knowledge, not the uploaded papers. Use phrases like:
-- "Based on general scientific knowledge..."
-- "From broader literature (not in uploaded papers)..."
-- "General background that may be relevant..."
-
-This separation helps users distinguish between information from their specific papers vs. general knowledge."""
+If the library already covers the question, add nothing."""
 
 # PDF upload addendum for when full PDF documents are sent to Claude
-PDF_UPLOAD_ADDENDUM = """
+PDF_UPLOAD_ADDENDUM = """You also have the full PDFs of the selected papers alongside the retrieved chunks.
 
----
-IMPORTANT: Full PDF Document Mode is ENABLED.
-
-You have access to BOTH:
-1. **Full PDF documents** of the selected papers (sent as complete documents)
-2. **Retrieved source chunks** from RAG (pre-identified relevant sections)
-
-How to use these resources together:
-
-**CRITICAL: You MUST cite the retrieved sources using [Source N] format throughout your response.**
-
-- The retrieved source chunks (RAG) are pre-identified relevant sections that directly address the query
-- The full PDFs provide broader context, additional details, and sections not captured in the RAG chunks
-- **Always start by thoroughly addressing the question using the retrieved source chunks with [Source N] citations**
-- You may then draw on the full PDFs to provide additional context, figures, methods details, or related information not in the RAG chunks
-- When referencing information from the PDFs that is NOT in the retrieved sources, clearly indicate this (e.g., "From the broader paper context..." or "As shown in the full document...")
-- Cross-reference between RAG chunks and full PDFs to provide comprehensive, well-cited answers
-
-This dual approach allows you to provide highly relevant cited information (from RAG) while having access to the complete paper context (from PDFs)."""
+The chunks are the passages already identified as relevant - cite those as [Source N]. The PDFs are there for whatever the chunks cut off: a figure, a table, a methods detail, the rest of a truncated sentence. When you use something from the full PDF that is not in the chunks, name where it came from ("from the Methods of <paper>"). Everything else is unchanged: lead with the answer, keep every number, no scaffolding."""
 
 # Web search system prompt - used for the separate web search call
 WEB_SEARCH_SYSTEM_PROMPT = """You are a helpful research assistant. Search the web for publicly available information related to the user's question. Focus on recent publications, news, educational resources, and general background information.
@@ -472,45 +379,88 @@ Provide factual information with source URLs. This is for educational and resear
 
 You may use markdown formatting (headers, bold, lists) to organize your response clearly."""
 
-# Legacy alias for backward compatibility
-SYSTEM_PROMPTS = SYSTEM_PROMPTS_CONCISE
+
+# The three editable prompt groups exposed by /user/prompts, and the prompt
+# types inside each. Custom overrides are stored as
+# {"base": {...}, "stance": {...}, "addendums": {...}}.
+PROMPT_GROUP_BASE = "base"
+PROMPT_GROUP_STANCE = "stance"
+PROMPT_GROUP_ADDENDUMS = "addendums"
+
+PROMPT_TYPES: Dict[str, tuple] = {
+    PROMPT_GROUP_BASE: ("base", "concise", "detailed"),
+    PROMPT_GROUP_STANCE: ANSWER_MODES,
+    PROMPT_GROUP_ADDENDUMS: ("general_knowledge", "web_search", "pdf_upload"),
+}
+
+DEFAULT_ADDENDUMS: Dict[str, str] = {
+    "general_knowledge": GENERAL_KNOWLEDGE_ADDENDUM,
+    "web_search": WEB_SEARCH_SYSTEM_PROMPT,
+    "pdf_upload": PDF_UPLOAD_ADDENDUM,
+}
 
 
-def get_effective_prompt(
-    query_type: QueryType,
-    response_mode: str,
-    custom_prompts: Optional[Dict[str, Any]] = None
+def get_default_prompt_groups() -> Dict[str, Dict[str, str]]:
+    """Every default prompt, grouped the way /user/prompts exposes them."""
+    return {
+        PROMPT_GROUP_BASE: {
+            "base": BASE_SYSTEM_PROMPT,
+            "concise": LENGTH_DIAL["concise"],
+            "detailed": LENGTH_DIAL["detailed"],
+        },
+        PROMPT_GROUP_STANCE: {m.value: ANSWER_STANCES[m] for m in AnswerMode},
+        PROMPT_GROUP_ADDENDUMS: dict(DEFAULT_ADDENDUMS),
+    }
+
+
+def _custom_override(
+    custom_prompts: Optional[Dict[str, Any]],
+    group: str,
+    prompt_type: str,
+) -> Optional[str]:
+    """Look up one user override, tolerating a malformed stored structure."""
+    if not custom_prompts:
+        return None
+    group_prompts = custom_prompts.get(group)
+    if not isinstance(group_prompts, dict):
+        return None
+    value = group_prompts.get(prompt_type)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def build_base_block(
+    response_mode: str = DEFAULT_RESPONSE_MODE,
+    custom_prompts: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Get the effective system prompt, preferring custom over default.
+    """The stance-independent half of the system prompt: invariants + length dial.
 
-    Args:
-        query_type: The type of query
-        response_mode: 'concise' or 'detailed'
-        custom_prompts: Optional dict of custom prompts from user preferences
-
-    Returns:
-        The effective system prompt to use
+    Kept in its own content block so that switching stance does not invalidate
+    it in the prompt cache.
     """
-    # Get default prompt
-    if response_mode == "detailed":
-        default = SYSTEM_PROMPTS_DETAILED.get(query_type, SYSTEM_PROMPTS_DETAILED[QueryType.FACTUAL])
-    else:
-        default = SYSTEM_PROMPTS_CONCISE.get(query_type, SYSTEM_PROMPTS_CONCISE[QueryType.FACTUAL])
+    base = _custom_override(custom_prompts, PROMPT_GROUP_BASE, "base") or BASE_SYSTEM_PROMPT
 
-    # Check for custom override
-    if custom_prompts and response_mode in custom_prompts:
-        mode_prompts = custom_prompts[response_mode]
-        if query_type.value in mode_prompts:
-            return mode_prompts[query_type.value]
+    mode_key = response_mode if response_mode in LENGTH_DIAL else DEFAULT_RESPONSE_MODE
+    length = _custom_override(custom_prompts, PROMPT_GROUP_BASE, mode_key) or LENGTH_DIAL[mode_key]
 
-    return default
+    return f"{base}\n\n{length}"
+
+
+def build_stance_block(
+    mode: AnswerMode = DEFAULT_ANSWER_MODE,
+    custom_prompts: Optional[Dict[str, Any]] = None,
+) -> str:
+    """The stance modifier for this turn."""
+    return (
+        _custom_override(custom_prompts, PROMPT_GROUP_STANCE, mode.value)
+        or ANSWER_STANCES.get(mode, ANSWER_STANCES[DEFAULT_ANSWER_MODE])
+    )
 
 
 def get_effective_addendum(
     addendum_type: str,
-    custom_prompts: Optional[Dict[str, Any]] = None
+    custom_prompts: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Get the effective addendum prompt, preferring custom over default.
+    """Get the effective addendum prompt, preferring a user override.
 
     Args:
         addendum_type: 'general_knowledge', 'web_search', or 'pdf_upload'
@@ -519,22 +469,10 @@ def get_effective_addendum(
     Returns:
         The effective addendum to use
     """
-    # Default addendums
-    defaults = {
-        "general_knowledge": GENERAL_KNOWLEDGE_ADDENDUM,
-        "web_search": WEB_SEARCH_SYSTEM_PROMPT,
-        "pdf_upload": PDF_UPLOAD_ADDENDUM,
-    }
-
-    default = defaults.get(addendum_type, "")
-
-    # Check for custom override
-    if custom_prompts and "addendums" in custom_prompts:
-        addendums = custom_prompts["addendums"]
-        if addendum_type in addendums:
-            return addendums[addendum_type]
-
-    return default
+    return (
+        _custom_override(custom_prompts, PROMPT_GROUP_ADDENDUMS, addendum_type)
+        or DEFAULT_ADDENDUMS.get(addendum_type, "")
+    )
 
 
 class QueryEngine:
@@ -679,7 +617,8 @@ class QueryEngine:
         enable_hyde_override: Optional[bool] = None,
         enable_expansion_override: Optional[bool] = None,
         enable_citation_check_override: Optional[bool] = None,
-        response_mode: str = "detailed",
+        mode: Optional[str] = None,
+        response_mode: str = DEFAULT_RESPONSE_MODE,
         enable_general_knowledge: bool = True,
         enable_web_search: bool = False,
         enable_pdf_upload: bool = False,
@@ -700,7 +639,10 @@ class QueryEngine:
             custom_prompts: Optional dict of custom system prompts from user preferences
             enable_expansion_override: Optional override for query expansion (None = use system default)
             enable_citation_check_override: Optional override for citation verification (None = use system default)
-            response_mode: "concise" for brief answers, "detailed" for comprehensive responses
+            mode: Response stance - ask|brainstorm|develop|refine|critique|draft (None = ask).
+                Orthogonal to retrieval: it selects the stance modifier on the
+                answer prompt and nothing else.
+            response_mode: Length dial - "concise" or "detailed"
             enable_general_knowledge: Whether to allow LLM to supplement with general knowledge
             enable_web_search: Whether to allow Claude to search the web for additional context
 
@@ -1049,14 +991,18 @@ class QueryEngine:
 
         # Use user-specified effort or fall back to the default depth
         effective_effort = effort if effort in EFFORT_LEVELS else DEFAULT_EFFORT
+        answer_mode = coerce_answer_mode(mode)
 
         # STEP 1: Generate RAG answer first
-        logger.info(f"[QUERY_ENGINE] Starting RAG answer generation with effort={effective_effort}")
+        logger.info(
+            f"[QUERY_ENGINE] Starting RAG answer generation with "
+            f"mode={answer_mode.value} effort={effective_effort}"
+        )
         answer = self._generate_answer(
             query=query,
-            query_type=query_type,
             sources=expanded_sources,
             stream_callback=answer_stream_callback if progress_callback else None,
+            mode=answer_mode,
             response_mode=response_mode,
             enable_general_knowledge=enable_general_knowledge,
             enable_web_search=enable_web_search,
@@ -1269,6 +1215,7 @@ class QueryEngine:
             query_type=query_type,
             classification=classification,
             answer=answer,
+            mode=answer_mode.value,
             sources=expanded_sources,
             retrieval_count=retrieval_count,
             reranked_count=reranked_count,
@@ -1395,10 +1342,10 @@ class QueryEngine:
     def _generate_answer(
         self,
         query: str,
-        query_type: QueryType,
         sources: List[Dict[str, Any]],
         stream_callback: Optional[callable] = None,
-        response_mode: str = "detailed",
+        mode: AnswerMode = DEFAULT_ANSWER_MODE,
+        response_mode: str = DEFAULT_RESPONSE_MODE,
         enable_general_knowledge: bool = True,
         enable_web_search: bool = False,
         progress_emitter: Optional[callable] = None,
@@ -1408,17 +1355,17 @@ class QueryEngine:
         enable_pdf_upload: bool = False,
         conversation_memory: Optional[ConversationMemory] = None,
     ) -> str:
-        """Generate answer using Claude with query-type-specific prompt.
+        """Generate the answer with Claude: base prompt + the selected stance.
 
         Includes conversation history for multi-turn context and retry logic
         for rate limits and transient errors.
 
         Args:
             query: The user query
-            query_type: Classification of the query type
             sources: Retrieved source documents
             stream_callback: Optional callback(chunk: str) for streaming response chunks
-            response_mode: "concise" for brief answers, "detailed" for comprehensive responses
+            mode: Response stance (AnswerMode) - selects the stance modifier
+            response_mode: Length dial - "concise" or "detailed"
             enable_general_knowledge: Whether to allow LLM to supplement with general knowledge
             enable_web_search: Whether to allow Claude to search the web
             progress_emitter: Optional callback(step, data) for progress events
@@ -1430,7 +1377,10 @@ class QueryEngine:
             Complete answer text
         """
         # Log the received parameters
-        logger.info(f"_generate_answer called - response_mode: {response_mode}, enable_general_knowledge: {enable_general_knowledge}, enable_web_search: {enable_web_search}, query_type: {query_type}")
+        logger.info(
+            f"_generate_answer called - mode: {mode.value}, response_mode: {response_mode}, "
+            f"enable_general_knowledge: {enable_general_knowledge}, enable_web_search: {enable_web_search}"
+        )
 
         if not sources:
             if enable_general_knowledge:
@@ -1443,18 +1393,10 @@ class QueryEngine:
         # Format sources
         sources_text = self._format_sources(sources) if sources else ""
 
-        # Get query-type-specific system prompt (using custom prompts if available)
-        base_system_prompt = get_effective_prompt(query_type, response_mode, custom_prompts)
-        is_custom = custom_prompts and response_mode in custom_prompts and query_type.value in custom_prompts.get(response_mode, {})
-
-        # Set max tokens based on response mode. Adaptive thinking shares this budget
-        # with the answer text, so both modes need headroom above the answer length.
-        if response_mode == "detailed":
-            max_tokens = 64000  # More tokens for detailed responses
-            logger.info(f"Using DETAILED prompt (custom={is_custom}) with max_tokens={max_tokens}")
-        else:
-            max_tokens = 32000
-            logger.info(f"Using CONCISE prompt (custom={is_custom}) with max_tokens={max_tokens}")
+        # Set max tokens. This is a ceiling, not a target - the prompt decides
+        # length. Adaptive thinking shares this budget with the answer text, so
+        # both modes keep headroom well above any answer we expect.
+        max_tokens = 64000 if response_mode == "detailed" else 32000
 
         # Web search requires general knowledge to be enabled
         if enable_web_search and not enable_general_knowledge:
@@ -1463,9 +1405,15 @@ class QueryEngine:
 
         # Build `system` as content blocks rather than one concatenated string:
         # cache_control attaches to blocks, and separate blocks keep the stable
-        # base prompt byte-identical no matter which addendums follow it.
+        # prefix byte-identical no matter what follows it.
+        #
+        # Order matters for the cache. The stance goes LAST, after the addendums,
+        # because it is the block the user flips between turns ("ask" then
+        # "critique"); everything before it then stays a valid cached prefix
+        # across a stance switch. The addendums are set-and-forget settings, so
+        # they sit in the stable region.
         system_blocks: List[Dict[str, Any]] = [
-            {"type": "text", "text": base_system_prompt}
+            {"type": "text", "text": build_base_block(response_mode, custom_prompts)}
         ]
 
         # Add general knowledge addendum if enabled (using custom addendum if available)
@@ -1484,16 +1432,21 @@ class QueryEngine:
             })
             logger.info("Added PDF upload addendum to system prompt")
 
-        # The breakpoint goes on the last block, which is the only placement that
-        # can clear Opus 5's 512-token floor (see CACHE_CONTROL_EPHEMERAL above).
+        # The stance modifier - always present, always last.
+        system_blocks.append(
+            {"type": "text", "text": build_stance_block(mode, custom_prompts)}
+        )
+
+        # Breakpoint on the last block, which covers the whole system prompt.
         _mark_cacheable(system_blocks[-1])
-        # With both addendums present, also break after the general-knowledge block
-        # so the (base + general knowledge) prefix gets its own entry and toggling
-        # PDF upload reads it instead of rewriting the whole system prompt. That
-        # prefix is 484-621 tokens in detailed mode, so it caches there; in concise
-        # mode it is 383-434 and the API skips it silently.
-        if len(system_blocks) == 3:
-            _mark_cacheable(system_blocks[1])
+        # And one on the block just before the stance, so the stance-independent
+        # prefix gets its own entry and switching stance reads it instead of
+        # rewriting everything. Re-measured with messages.count_tokens (table
+        # above CACHE_CONTROL_EPHEMERAL): that prefix is 1,041 tokens in the
+        # default configuration and 867 at its smallest, both well clear of
+        # Opus 5's 512-token floor.
+        if len(system_blocks) > 1:
+            _mark_cacheable(system_blocks[-2])
 
         # Build messages array with conversation history
         messages = []
@@ -1535,14 +1488,14 @@ class QueryEngine:
             if sources:
                 current_message = f"""Question: {query}
 
-Retrieved Sources from Uploaded Papers:
+Retrieved sources from the library:
 {sources_text}
 
-IMPORTANT: You MUST cite these sources using [Source N] format in your response. Start by answering the question using these sources with proper citations."""
+Cite these as [Source N]. Answer the question first."""
             else:
                 current_message = f"""Question: {query}
 
-No sources were retrieved from the uploaded papers. Please answer based on your general scientific knowledge, clearly indicating that this response comes from general knowledge rather than the uploaded papers."""
+Nothing was retrieved from the library for this question. Say so in a sentence, then answer from your own scientific knowledge if you can, marked as such."""
 
             messages.append({"role": "user", "content": current_message})
 

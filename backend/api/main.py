@@ -5,7 +5,7 @@ import time
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Dict
 
 from fastapi import FastAPI, HTTPException, Depends, Request, Response, UploadFile, File, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,8 +29,14 @@ from dependencies import (
     get_paper_library_service,
 )
 from qdrant_client import QdrantClient
-from retrieval.query_engine import QueryEngine, EFFORT_LEVELS, SYSTEM_PROMPTS_CONCISE, SYSTEM_PROMPTS_DETAILED, GENERAL_KNOWLEDGE_ADDENDUM, WEB_SEARCH_SYSTEM_PROMPT, PDF_UPLOAD_ADDENDUM
-from retrieval.query_classifier import QueryType
+from retrieval.query_engine import (
+    QueryEngine,
+    EFFORT_LEVELS,
+    ANSWER_MODES,
+    DEFAULT_ANSWER_MODE,
+    PROMPT_TYPES,
+    get_default_prompt_groups,
+)
 from retrieval.qdrant_store import QdrantStore
 from services.paper_library import PaperLibraryService
 from services.chat_service import ChatService
@@ -385,9 +391,18 @@ class QueryRequest(BaseModel):
         default=None,
         description="Enable citation verification. If None, uses system default."
     )
+    mode: str = Field(
+        default=DEFAULT_ANSWER_MODE.value,
+        description=(
+            "Response stance: ask (answer the question), brainstorm (generate "
+            "possibilities), develop (build out a stated idea), refine (tighten "
+            "an idea), critique (argue against it), draft (turn it into writing). "
+            "Selects the stance modifier on the answer prompt; does not affect retrieval."
+        )
+    )
     response_mode: str = Field(
         default="detailed",
-        description="Response detail level. 'concise' for brief answers, 'detailed' for comprehensive explanations with more context and depth."
+        description="Length dial. 'concise' keeps the answer tight; 'detailed' allows room for mechanism and conditions. Neither reintroduces report structure."
     )
     enable_general_knowledge: bool = Field(
         default=True,
@@ -408,6 +423,13 @@ class QueryRequest(BaseModel):
         valid_modes = ['concise', 'detailed']
         if v not in valid_modes:
             raise ValueError(f"response_mode must be one of {valid_modes}, got '{v}'")
+        return v
+
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in ANSWER_MODES:
+            raise ValueError(f"mode must be one of {list(ANSWER_MODES)}, got '{v}'")
         return v
 
     @field_validator('effort')
@@ -460,6 +482,7 @@ class QueryResponse(BaseModel):
     reranked_count: int
     warnings: List[str] = []
     citation_checks: List[CitationCheck] = []
+    mode: str = DEFAULT_ANSWER_MODE.value
     response_mode: str = "detailed"
     used_general_knowledge: bool = True
     used_web_search: bool = False
@@ -612,7 +635,7 @@ async def query_papers(
     """
     try:
         # Log received query options
-        logger.info(f"Query request received - top_k: {request.top_k}, effort: {request.effort}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
+        logger.info(f"Query request received - top_k: {request.top_k}, mode: {request.mode}, effort: {request.effort}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
 
         # Fetch user's custom prompts if authenticated
         custom_prompts = None
@@ -636,6 +659,7 @@ async def query_papers(
             enable_hyde_override=request.enable_hyde,
             enable_expansion_override=request.enable_expansion,
             enable_citation_check_override=request.enable_citation_check,
+            mode=request.mode,
             response_mode=request.response_mode,
             enable_general_knowledge=request.enable_general_knowledge,
             enable_web_search=request.enable_web_search,
@@ -681,7 +705,14 @@ async def query_papers(
                     # Auto-create conversation with first message as title
                     title = request.question[:100] + "..." if len(request.question) > 100 else request.question
                     await chat_service.create_conversation(
-                        request.conversation_id, current_user.id, title=title
+                        request.conversation_id, current_user.id, title=title,
+                        mode=request.mode,
+                    )
+                else:
+                    # Remember the stance this thread is being held in so
+                    # reopening it restores the selector.
+                    await chat_service.set_conversation_mode(
+                        request.conversation_id, current_user.id, request.mode
                     )
 
                 # Save user message
@@ -720,6 +751,7 @@ async def query_papers(
             reranked_count=result.reranked_count,
             warnings=result.warnings,
             citation_checks=citation_checks,
+            mode=result.mode,
             response_mode=request.response_mode,
             used_general_knowledge=request.enable_general_knowledge,
             used_web_search=request.enable_web_search,
@@ -755,7 +787,7 @@ async def query_papers_stream(
     persisted to the database for chat history.
     """
     # Log received query options for streaming endpoint
-    logger.info(f"Stream query request - top_k: {request.top_k}, effort: {request.effort}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
+    logger.info(f"Stream query request - top_k: {request.top_k}, mode: {request.mode}, effort: {request.effort}, response_mode: {request.response_mode}, enable_general_knowledge: {request.enable_general_knowledge}, enable_web_search: {request.enable_web_search}")
 
     # Fetch user's custom prompts if authenticated (before generator to avoid async issues)
     custom_prompts = None
@@ -791,6 +823,7 @@ async def query_papers_stream(
                     enable_hyde_override=request.enable_hyde,
                     enable_expansion_override=request.enable_expansion,
                     enable_citation_check_override=request.enable_citation_check,
+                    mode=request.mode,
                     response_mode=request.response_mode,
                     enable_general_knowledge=request.enable_general_knowledge,
                     enable_web_search=request.enable_web_search,
@@ -870,6 +903,7 @@ async def query_papers_stream(
                 "reranked_count": result.reranked_count,
                 "warnings": result.warnings,
                 "citation_checks": citation_checks,
+                "mode": result.mode,
                 "response_mode": request.response_mode,
                 "used_general_knowledge": request.enable_general_knowledge,
                 "used_web_search": request.enable_web_search,
@@ -900,9 +934,16 @@ async def query_papers_stream(
                         # Auto-create conversation with first message as title
                         title = request.question[:100] + "..." if len(request.question) > 100 else request.question
                         await chat_service.create_conversation(
-                            request.conversation_id, current_user.id, title=title
+                            request.conversation_id, current_user.id, title=title,
+                            mode=request.mode,
                         )
                         logger.info(f"[DB_SAVE] Created new conversation {request.conversation_id}")
+                    else:
+                        # Remember the stance this thread is being held in so
+                        # reopening it restores the selector.
+                        await chat_service.set_conversation_mode(
+                            request.conversation_id, current_user.id, request.mode
+                        )
 
                     # Save user message
                     logger.info(f"[DB_SAVE] Saving user message - Length: {len(request.question)} chars")
@@ -2239,30 +2280,32 @@ async def update_user_preferences(
 # =============================================================================
 
 class SystemPromptsResponse(BaseModel):
-    """Response model for system prompts."""
-    defaults: dict  # All default prompts organized by mode
+    """Response model for system prompts.
+
+    Prompts are grouped as base / stance / addendums. The previous shape was
+    keyed by (response_mode, query_type) - 16 slots - and was replaced when the
+    query-type prompt tables were deleted.
+    """
+    defaults: dict  # All default prompts, grouped
     custom: Optional[dict] = None  # User's custom prompts (null if none)
-    query_types: List[str]  # Available query types
+    prompt_types: Dict[str, List[str]]  # group -> editable prompt types, in order
 
 
 class SystemPromptUpdateRequest(BaseModel):
     """Request model for updating a single system prompt."""
-    mode: str = Field(..., description="'concise', 'detailed', or 'addendums'")
-    prompt_type: str = Field(..., description="Query type or addendum name")
-    content: str = Field(..., description="New prompt content")
+    mode: str = Field(..., description="Prompt group: 'base', 'stance', or 'addendums'")
+    prompt_type: str = Field(..., description="Prompt type within the group")
+    content: str = Field(..., min_length=1, description="New prompt content")
+
+
+def _prompt_type_index() -> Dict[str, List[str]]:
+    """The editable prompt types in each group, in display order."""
+    return {group: list(types) for group, types in PROMPT_TYPES.items()}
 
 
 def get_default_prompts() -> dict:
-    """Get all default system prompts organized by mode."""
-    return {
-        "concise": {qt.value: SYSTEM_PROMPTS_CONCISE[qt] for qt in QueryType},
-        "detailed": {qt.value: SYSTEM_PROMPTS_DETAILED[qt] for qt in QueryType},
-        "addendums": {
-            "general_knowledge": GENERAL_KNOWLEDGE_ADDENDUM,
-            "web_search": WEB_SEARCH_SYSTEM_PROMPT,
-            "pdf_upload": PDF_UPLOAD_ADDENDUM,
-        }
-    }
+    """Get all default system prompts, grouped as base / stance / addendums."""
+    return get_default_prompt_groups()
 
 
 @app.get("/user/prompts", response_model=SystemPromptsResponse)
@@ -2278,12 +2321,11 @@ async def get_system_prompts(
 
     defaults = get_default_prompts()
     custom = prefs.custom_system_prompts if prefs else None
-    query_types = [qt.value for qt in QueryType]
 
     return SystemPromptsResponse(
         defaults=defaults,
         custom=custom,
-        query_types=query_types,
+        prompt_types=_prompt_type_index(),
     )
 
 
@@ -2294,18 +2336,20 @@ async def update_system_prompt(
     session: AsyncSession = Depends(get_async_session),
 ):
     """Update a single system prompt."""
-    # Validate mode
-    if request.mode not in ["concise", "detailed", "addendums"]:
-        raise HTTPException(status_code=400, detail="Invalid mode. Must be 'concise', 'detailed', or 'addendums'")
+    # Validate group
+    if request.mode not in PROMPT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode. Must be one of: {list(PROMPT_TYPES)}",
+        )
 
-    # Validate prompt_type
-    valid_query_types = [qt.value for qt in QueryType]
-    valid_addendums = ["general_knowledge", "web_search"]
-
-    if request.mode in ["concise", "detailed"] and request.prompt_type not in valid_query_types:
-        raise HTTPException(status_code=400, detail=f"Invalid prompt_type. Must be one of: {valid_query_types}")
-    if request.mode == "addendums" and request.prompt_type not in valid_addendums:
-        raise HTTPException(status_code=400, detail=f"Invalid prompt_type for addendums. Must be one of: {valid_addendums}")
+    # Validate prompt_type within the group
+    valid_types = PROMPT_TYPES[request.mode]
+    if request.prompt_type not in valid_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid prompt_type for '{request.mode}'. Must be one of: {list(valid_types)}",
+        )
 
     # Get or create preferences
     result = await session.execute(
@@ -2342,7 +2386,7 @@ async def update_system_prompt(
     return SystemPromptsResponse(
         defaults=get_default_prompts(),
         custom=prefs.custom_system_prompts,
-        query_types=[qt.value for qt in QueryType],
+        prompt_types=_prompt_type_index(),
     )
 
 
@@ -2354,9 +2398,12 @@ async def reset_single_prompt(
     session: AsyncSession = Depends(get_async_session),
 ):
     """Reset a single prompt to default."""
-    # Validate mode
-    if mode not in ["concise", "detailed", "addendums"]:
-        raise HTTPException(status_code=400, detail="Invalid mode")
+    # Validate group
+    if mode not in PROMPT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode. Must be one of: {list(PROMPT_TYPES)}",
+        )
 
     result = await session.execute(
         select(UserPreferences).where(UserPreferences.user_id == current_user.id)
@@ -2423,6 +2470,7 @@ class ConversationResponse(BaseModel):
     """Response model for a conversation."""
     id: str
     title: Optional[str] = None
+    mode: str = DEFAULT_ANSWER_MODE.value
     created_at: datetime
     updated_at: datetime
     messages: List[MessageResponse] = []
@@ -2438,11 +2486,30 @@ class CreateConversationRequest(BaseModel):
     """Request model for creating a conversation."""
     id: str = Field(..., description="UUID for the conversation")
     title: Optional[str] = None
+    mode: Optional[str] = Field(default=None, description=f"Response stance, one of {list(ANSWER_MODES)}")
+
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ANSWER_MODES:
+            raise ValueError(f"mode must be one of {list(ANSWER_MODES)}, got '{v}'")
+        return v
 
 
 class UpdateConversationRequest(BaseModel):
-    """Request model for updating a conversation."""
+    """Request model for updating a conversation.
+
+    Fields left unset are not written - a mode-only update keeps the title.
+    """
     title: Optional[str] = None
+    mode: Optional[str] = Field(default=None, description=f"Response stance, one of {list(ANSWER_MODES)}")
+
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ANSWER_MODES:
+            raise ValueError(f"mode must be one of {list(ANSWER_MODES)}, got '{v}'")
+        return v
 
 
 class AddMessageRequest(BaseModel):
@@ -2465,6 +2532,7 @@ async def list_conversations(
             ConversationResponse(
                 id=c.id,
                 title=c.title,
+                mode=c.mode,
                 created_at=c.created_at,
                 updated_at=c.updated_at,
             )
@@ -2486,10 +2554,12 @@ async def create_conversation(
         conversation_id=request.id,
         user_id=current_user.id,
         title=request.title,
+        mode=request.mode,
     )
     return ConversationResponse(
         id=conversation.id,
         title=conversation.title,
+        mode=conversation.mode,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
     )
@@ -2514,6 +2584,7 @@ async def get_conversation(
     return ConversationResponse(
         id=conversation.id,
         title=conversation.title,
+        mode=conversation.mode,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
         messages=[
@@ -2536,12 +2607,13 @@ async def update_conversation(
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_async_session)],
 ):
-    """Update a conversation's title."""
+    """Update a conversation's title and/or response stance."""
     chat_service = ChatService(session)
     conversation = await chat_service.update_conversation(
         conversation_id=conversation_id,
         user_id=current_user.id,
         title=request.title,
+        mode=request.mode,
     )
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -2549,6 +2621,7 @@ async def update_conversation(
     return ConversationResponse(
         id=conversation.id,
         title=conversation.title,
+        mode=conversation.mode,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
     )

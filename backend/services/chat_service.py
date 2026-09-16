@@ -50,7 +50,8 @@ class ChatService:
         self,
         conversation_id: str,
         user_id: int,
-        title: Optional[str] = None
+        title: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> Conversation:
         """Create a new conversation."""
         conversation = Conversation(
@@ -58,6 +59,8 @@ class ChatService:
             user_id=user_id,
             title=title,
         )
+        if mode:
+            conversation.mode = mode
         self.session.add(conversation)
         await self.session.commit()
         await self.session.refresh(conversation)
@@ -68,20 +71,49 @@ class ChatService:
         self,
         conversation_id: str,
         user_id: int,
-        title: Optional[str] = None
+        title: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> Optional[Conversation]:
-        """Update a conversation's title."""
+        """Update a conversation's title and/or response stance.
+
+        Only the fields that are passed are written; omitting one leaves the
+        stored value alone.
+        """
+        values: dict = {"updated_at": datetime.utcnow()}
+        if title is not None:
+            values["title"] = title
+        if mode is not None:
+            values["mode"] = mode
+
         result = await self.session.execute(
             update(Conversation)
             .where(
                 Conversation.id == conversation_id,
                 Conversation.user_id == user_id
             )
-            .values(title=title, updated_at=datetime.utcnow())
+            .values(**values)
             .returning(Conversation)
         )
         await self.session.commit()
         return result.scalar_one_or_none()
+
+    async def set_conversation_mode(
+        self,
+        conversation_id: str,
+        user_id: int,
+        mode: str,
+    ) -> None:
+        """Record the response stance this conversation was last queried with."""
+        await self.session.execute(
+            update(Conversation)
+            .where(
+                Conversation.id == conversation_id,
+                Conversation.user_id == user_id,
+                Conversation.mode != mode,
+            )
+            .values(mode=mode)
+        )
+        await self.session.commit()
 
     async def delete_conversation(self, conversation_id: str, user_id: int) -> bool:
         """Delete a conversation and all its messages."""

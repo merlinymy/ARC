@@ -53,6 +53,10 @@ class Conversation(Base):
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Response stance last used in this thread: ask | brainstorm | develop |
+    # refine | critique | draft. Persisted per conversation so reopening a
+    # thread restores the stance it was being held in.
+    mode: Mapped[str] = mapped_column(String(20), default="ask", server_default="ask", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )
@@ -162,7 +166,12 @@ class UserPreferences(Base):
     enable_web_search: Mapped[bool] = mapped_column(default=False)
     enable_pdf_upload: Mapped[bool] = mapped_column(default=False)
     # Custom system prompts (JSON structure for user-customized prompts)
-    # Format: {"concise": {"factual": "...", ...}, "detailed": {...}, "addendums": {"general_knowledge": "...", "web_search": "..."}}
+    # Format: {"base": {"base": "...", "concise": "...", "detailed": "..."},
+    #          "stance": {"ask": "...", "critique": "...", ...},
+    #          "addendums": {"general_knowledge": "...", "web_search": "...", "pdf_upload": "..."}}
+    # Superseded the old {"concise"|"detailed": {<query_type>: ...}} shape when the
+    # 16 query-type prompts were replaced by base + stance. Legacy keys, if any
+    # exist, are left in place but are no longer read.
     custom_system_prompts: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     # Timestamps
     updated_at: Mapped[datetime] = mapped_column(

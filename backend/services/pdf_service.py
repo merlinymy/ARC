@@ -220,14 +220,14 @@ class PDFService:
         if sources_text:
             text_content = f"""Question: {query}
 
-Retrieved Sources from Uploaded Papers (RAG):
+Retrieved sources from the library (RAG):
 {sources_text}
 
-IMPORTANT: You have access to both the full PDF documents AND the retrieved source chunks. Use both to provide a comprehensive answer with proper citations using [Source N] format."""
+You have the full PDFs as well as these chunks. Cite the chunks as [Source N]. Answer the question first."""
         else:
             text_content = f"""Question: {query}
 
-IMPORTANT: You have access to the full PDF documents. Please analyze them to answer the question comprehensively."""
+You have the full PDFs of the selected papers. Answer the question first, and name where in the paper each value came from."""
 
         # Add text content
         content.append({

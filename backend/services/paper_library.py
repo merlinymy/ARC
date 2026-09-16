@@ -293,14 +293,18 @@ class PaperLibraryService:
 
         Searches in both upload_dir and pdf_source_dir.
         """
-        # Search in upload directory
-        for pdf_file in self.upload_dir.glob("*.pdf"):
-            if self._generate_paper_id(pdf_file.name) == paper_id:
-                return pdf_file
-
-        # Search in source directory if configured
-        if settings.pdf_source_dir and settings.pdf_source_dir.exists():
-            for pdf_file in settings.pdf_source_dir.glob("*.pdf"):
+        # `glob("*.pdf")` is case-sensitive on APFS, so the 7 papers on this
+        # volume with an uppercase `.PDF` extension resolved to None here --
+        # which meant a 404 from both `/papers/{id}/pdf` and the figure crop
+        # route even once the paper was indexed.
+        for directory in (self.upload_dir, settings.pdf_source_dir):
+            if not directory or not directory.exists():
+                continue
+            for pdf_file in directory.iterdir():
+                if pdf_file.suffix.lower() != ".pdf":
+                    continue
+                if pdf_file.name.startswith("._"):   # AppleDouble sidecar
+                    continue
                 if self._generate_paper_id(pdf_file.name) == paper_id:
                     return pdf_file
 
@@ -975,13 +979,25 @@ class PaperLibraryService:
                     "sub_progress": sub,
                 })
 
-            embeddings = self.embedder.embed_documents(texts, progress_callback=embedding_progress)
+            # One paper's chunks, embedded together, so an uploaded paper gets the
+            # same document-aware vectors as one that came through the staged
+            # reindex. `embed_documents` would have put each chunk in its own
+            # document -- correct vector space, no document context -- which is
+            # a silent quality split between the two ingest paths.
+            if self.embedder.contextualized:
+                embeddings = self.embedder.embed_document_chunks(
+                    texts, paper_id=paper_id, progress_callback=embedding_progress)
+            else:
+                embeddings = self.embedder.embed_documents(
+                    texts, progress_callback=embedding_progress)
 
-            # Create full-paper embedding
-            pooling_texts = [c.embed_text for c in chunks
-                             if c.chunk_type in [ChunkType.ABSTRACT, ChunkType.SECTION]]
-            if pooling_texts:
-                full_embedding = self.embedder.compute_mean_pooled_embedding(pooling_texts)
+            # Create full-paper embedding by pooling the vectors already paid
+            # for, rather than re-embedding abstract+section text a second time.
+            pooling_idx = [i for i, c in enumerate(chunks)
+                           if c.chunk_type in [ChunkType.ABSTRACT, ChunkType.SECTION]]
+            if pooling_idx:
+                full_embedding = self.embedder.pool_vectors(
+                    [embeddings[i] for i in pooling_idx])
                 full_chunk = processor.chunker.make_full_chunk(chunks)
                 if full_chunk is not None:
                     chunks.append(full_chunk)

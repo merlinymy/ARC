@@ -85,7 +85,8 @@ def main():
         names = names[:args.limit]
 
     detector = SectionDetector()
-    extractor = MinerUExtractor(timeout=args.timeout)
+    # Crops go next to the sample records, not into the production library.
+    extractor = MinerUExtractor(timeout=args.timeout, assets_base=rec_dir)
     results = []
     results_path = out_dir / "results.json"
 
@@ -96,7 +97,8 @@ def main():
         t0 = time.time()
         print(f"[{n}/{len(names)}] {name}", flush=True)
         try:
-            content = extractor.extract(pdf_path, paper_id=paper_id)
+            content = extractor.extract(pdf_path, paper_id=paper_id,
+                                        assets_base=rec_dir)
             record = content.record
             if record is None:
                 raise RuntimeError("no record returned")

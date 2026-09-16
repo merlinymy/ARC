@@ -27,7 +27,9 @@ def main(rec_dir="data/w1_sample/records", results=None):
         before = (record["stats"]["n_sections"], record["stats"]["abstract_source"],
                   sum(1 for s in record["sections"]
                       if s["normalized_name"] not in ("body", "frontmatter")))
-        pr.rebuild_derived(record)
+        # `base` so the asset summary is recomputed against the sample's own
+        # crop directory rather than the production library.
+        pr.rebuild_derived(record, base=Path(rec_dir))
         after = (record["stats"]["n_sections"], record["stats"]["abstract_source"],
                  sum(1 for s in record["sections"]
                      if s["normalized_name"] not in ("body", "frontmatter")))

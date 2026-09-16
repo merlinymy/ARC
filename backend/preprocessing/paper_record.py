@@ -52,6 +52,26 @@ Storage
 Block text is stored once.  Page text, the document text and section text are all
 *derived* by joining block text, never stored, so the record is ~1x the paper's
 characters rather than 4x.
+
+Figure and table crops (schema 2)
+---------------------------------
+MinerU crops every figure and table it detects to a JPEG.  Schema 1 handed the
+crop writer a ``tempfile.TemporaryDirectory()``, so the bytes were deleted when
+the extraction subprocess exited and every ``img_path`` in every record was
+dangling.  Schema 2 writes them to a durable per-paper directory instead::
+
+    processed_data/{paper_id}.json          the record
+    processed_data/{paper_id}/figures/*.jpg the crops
+
+``img_path`` is now stored **relative to** ``processed_data/{paper_id}/`` --
+``"figures/<sha256>.jpg"`` -- so a record stays valid if the library moves.
+Resolve it with :func:`asset_path` / :func:`figure_image`, never by hand.
+
+Filenames are MinerU's content hash, so re-extracting an unchanged paper
+rewrites the same names.  :func:`prune_assets` then deletes anything in the
+directory the new record does not reference, so a re-extraction that *does*
+change the crops (a MinerU upgrade, a different page raster) cannot accumulate
+orphans.
 """
 
 from __future__ import annotations
@@ -68,7 +88,18 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+#: 1 -> 2: figure/table crops persisted; ``img_path`` became a relative asset
+#: reference and image blocks gained ``image_bbox``.  Schema-1 records stay
+#: readable -- every new field is optional and every accessor degrades to
+#: "no image available" rather than raising.
+SCHEMA_VERSION = 2
+
+#: Subdirectory of ``processed_data/{paper_id}/`` holding the crops.
+FIGURES_SUBDIR = "figures"
+
+#: Extensions MinerU can write as a crop.  Used to bound :func:`prune_assets`
+#: so it can never delete anything else that ends up in the directory.
+ASSET_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 
 #: Separator inserted between two blocks when a page's text is reassembled.
 BLOCK_SEP = "\n\n"
@@ -181,19 +212,28 @@ def _sanitize(text: Any) -> str:
     return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
-def _image_name(img_path: Any) -> Optional[str]:
-    """MinerU's content-hash image filename, without the temp directory.
+def _image_ref(img_path: Any) -> Optional[str]:
+    """Normalize MinerU's ``img_path`` into a record-relative asset reference.
 
-    Cropped images are written to a ``TemporaryDirectory`` that is removed when
-    the extraction subprocess exits, so the absolute path in ``content_list`` is
-    already dangling by the time the record is read. The basename is stable
-    (MinerU derives it from the image content) and is kept as an identifier;
-    persisting the image bytes is not part of W1.
+    ``pdf_processor`` passes ``FIGURES_SUBDIR`` as MinerU's ``img_buket_path``,
+    so ``content_list`` already carries ``"figures/<sha256>.jpg"`` -- relative to
+    ``processed_data/{paper_id}/``, which is exactly what we want to store.
+
+    An *absolute* path means the crop went somewhere outside the record's own
+    directory (schema-1 behaviour: a temp dir that no longer exists).  Those are
+    reduced to ``figures/<basename>`` so the reference has the schema-2 shape;
+    :func:`asset_path` existence-checks it, so a schema-1 record reports "no
+    image" instead of handing out a dangling path.
     """
     if not img_path:
         return None
-    name = str(img_path).rsplit("/", 1)[-1]
-    return name or None
+    # MinerU writes flat, content-hashed filenames into the bucket directory, so
+    # the basename is the whole identity and normalizing to one shape means
+    # asset_path only ever has to resolve `figures/<name>`.
+    name = str(img_path).strip().replace("\\", "/").rsplit("/", 1)[-1]
+    if not name or name in (".", ".."):
+        return None
+    return f"{FIGURES_SUBDIR}/{name}"
 
 
 def _clean_bbox(bbox: Any) -> Optional[List[int]]:
@@ -206,7 +246,8 @@ def _clean_bbox(bbox: Any) -> Optional[List[int]]:
 
 
 def _flatten_content_list(content_list: List[Any],
-                          cross_page_map: Optional[Dict] = None) -> List[Dict[str, Any]]:
+                          cross_page_map: Optional[Dict] = None,
+                          image_bbox_map: Optional[Dict] = None) -> List[Dict[str, Any]]:
     """Turn MinerU's ``content_list`` into a flat list of record blocks.
 
     One content item can yield several blocks: a table item becomes its caption
@@ -274,7 +315,7 @@ def _flatten_content_list(content_list: List[Any],
                 page_idx,
                 bbox,
                 text_format=item.get("text_format"),
-                img_path=_image_name(item.get("img_path")),
+                img_path=_image_ref(item.get("img_path")),
             )
 
         elif itype in ("image", "table"):
@@ -301,7 +342,14 @@ def _flatten_content_list(content_list: List[Any],
                 body_text,
                 page_idx,
                 bbox,
-                img_path=_image_name(item.get("img_path")),
+                img_path=_image_ref(item.get("img_path")),
+                # MinerU's content_list bbox for an image/table item is the
+                # *group* rectangle (picture + caption + footnote). The tighter
+                # rectangle of the picture itself only exists in middle_json, so
+                # pdf_processor passes it in; it is what the figure highlight and
+                # the crop actually correspond to.
+                image_bbox=_clean_bbox((image_bbox_map or {}).get(
+                    (int(page_idx), tuple(_clean_bbox(bbox) or ())))),
             )
 
             for foot in item.get(foot_key, []) or []:
@@ -725,7 +773,7 @@ def _base_record(paper_id: str, file_name: str, extractor: str) -> Dict[str, Any
         "page_sep": PAGE_SEP,
         "capabilities": {
             "tables": True, "captions": True, "sections": True,
-            "bbox": True, "page_offsets": True,
+            "bbox": True, "page_offsets": True, "figure_images": False,
         },
         "metadata": {},
         "pages": [],
@@ -736,6 +784,8 @@ def _base_record(paper_id: str, file_name: str, extractor: str) -> Dict[str, Any
         "figures": [],
         "equations": [],
         "caption_blocks": [],
+        "assets": {"dir": f"{paper_id}/{FIGURES_SUBDIR}", "n_referenced": 0,
+                   "n_present": 0, "bytes": 0, "referenced_by_block_type": {}},
         "stats": {},
     }
 
@@ -748,6 +798,8 @@ def build_record(
     pdf_path: Optional[Path] = None,
     extractor_version: str = "",
     cross_page_map: Optional[Dict] = None,
+    image_bbox_map: Optional[Dict] = None,
+    assets_base: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Build a full paper record from MinerU output.
 
@@ -774,7 +826,8 @@ def build_record(
         if isinstance(item, dict):
             observed_keys.setdefault(item.get("type", "?"), set()).update(item.keys())
 
-    blocks = _reorder_by_page(_flatten_content_list(content_list, cross_page_map))
+    blocks = _reorder_by_page(
+        _flatten_content_list(content_list, cross_page_map, image_bbox_map))
     pages, _ = _assign_offsets(blocks, page_sizes)
     sections = _build_sections(blocks)
     _tag_blocks_with_sections(blocks, sections)
@@ -789,9 +842,17 @@ def build_record(
         if block["type"] == BLOCK_TABLE:
             rows, cols = _count_table_shape(block["text"])
             tables.append({
+                # `figure_id` is the public handle: it is what a chunk payload
+                # carries, what `/papers/{id}/figures/{figure_id}` resolves and
+                # what the reference resolver points at. `{kind}_{ordinal}`,
+                # ordinal being the index in this list.
+                "figure_id": f"table_{len(tables)}",
+                "kind": "table",
+                "index": len(tables),
                 "block": block["i"],
                 "page_idx": block["page_idx"],
                 "bbox": block["bbox"],
+                "image_bbox": block.get("image_bbox"),
                 "caption_blocks": block.get("caption_blocks", []),
                 "footnote_blocks": block.get("footnote_blocks", []),
                 "section_id": block.get("section_id"),
@@ -803,9 +864,13 @@ def build_record(
             })
         elif block["type"] == BLOCK_IMAGE:
             figures.append({
+                "figure_id": f"figure_{len(figures)}",
+                "kind": "figure",
+                "index": len(figures),
                 "block": block["i"],
                 "page_idx": block["page_idx"],
                 "bbox": block["bbox"],
+                "image_bbox": block.get("image_bbox"),
                 "caption_blocks": block.get("caption_blocks", []),
                 "footnote_blocks": block.get("footnote_blocks", []),
                 "section_id": block.get("section_id"),
@@ -835,6 +900,9 @@ def build_record(
         "num_pages": len(pages),
         "file_name": file_name,
     }
+    label_objects(record)
+    record["assets"] = asset_summary(record, assets_base)
+    record["capabilities"]["figure_images"] = record["assets"]["n_present"] > 0
     record["stats"] = _compute_stats(record)
     record["stats"]["mineru_item_keys"] = {k: sorted(v) for k, v in sorted(observed_keys.items())}
     return record
@@ -869,6 +937,10 @@ def _compute_stats(record: Dict[str, Any]) -> Dict[str, Any]:
         "n_tables": len(record["tables"]),
         "n_tables_with_body": sum(1 for t in record["tables"] if t["has_body"]),
         "n_figures": len(record["figures"]),
+        "n_figure_images": sum(1 for f in record["figures"] if f.get("img_path")),
+        "n_table_images": sum(1 for t in record["tables"] if t.get("img_path")),
+        "n_labeled_objects": sum(1 for e in (record["figures"] + record["tables"])
+                                 if e.get("label")),
         "n_equations": len(record["equations"]),
         "n_captions": len(record["caption_blocks"]),
         "has_abstract": record["abstract"] is not None,
@@ -898,7 +970,7 @@ def build_degraded_record(
     record["degraded_reason"] = reason
     record["capabilities"] = {
         "tables": False, "captions": False, "sections": False,
-        "bbox": False, "page_offsets": True,
+        "bbox": False, "page_offsets": True, "figure_images": False,
     }
     record.update(_file_facts(pdf_path))
 
@@ -983,7 +1055,7 @@ def build_failed_record(paper_id: str, file_name: str,
 # Reassembly and verification
 # ---------------------------------------------------------------------------
 
-def rebuild_derived(record: Dict[str, Any]) -> Dict[str, Any]:
+def rebuild_derived(record: Dict[str, Any], base: Optional[Path] = None) -> Dict[str, Any]:
     """Recompute sections, abstract and stats from the stored blocks, in place.
 
     Blocks, offsets and page geometry are untouched -- only the derived layers are
@@ -1006,6 +1078,9 @@ def rebuild_derived(record: Dict[str, Any]) -> Dict[str, Any]:
             entry["section_id"] = blocks[entry["block"]].get("section_id")
     for entry in record.get("equations", []):
         entry["section_id"] = blocks[entry["block"]].get("section_id")
+    label_objects(record)
+    record["assets"] = asset_summary(record, base)
+    record.setdefault("capabilities", {})["figure_images"] = record["assets"]["n_present"] > 0
     keys = record["stats"].get("mineru_item_keys")
     record["stats"] = _compute_stats(record)
     if keys is not None:
@@ -1091,6 +1166,223 @@ def table_texts(record: Dict[str, Any], with_caption: bool = True) -> List[str]:
             parts += [blocks[i]["text"] for i in table.get("footnote_blocks", [])]
         out.append("\n".join(p for p in parts if p))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Figure and table objects, and their persisted crops
+# ---------------------------------------------------------------------------
+
+def assets_dir(paper_id: str, base: Optional[Path] = None) -> Path:
+    """``processed_data/{paper_id}/`` -- the paper's own asset directory.
+
+    Sits alongside ``processed_data/{paper_id}.json``, so one ``base`` locates
+    both and a sample harness pointing ``base`` at a scratch directory gets its
+    crops there too instead of writing into the production library.
+    """
+    return records_dir(base) / paper_id
+
+
+def figures_dir(paper_id: str, base: Optional[Path] = None) -> Path:
+    return assets_dir(paper_id, base) / FIGURES_SUBDIR
+
+
+def asset_path(paper_id: str, ref: Optional[str],
+               base: Optional[Path] = None) -> Optional[Path]:
+    """Resolve a stored ``img_path`` to a file that **exists**, or ``None``.
+
+    Returning ``None`` rather than a Path is deliberate: schema-1 records store a
+    temp-directory path that has been deleted, and a crop can also be missing
+    because MinerU declined to write one.  Callers that must render an image
+    need to branch on that anyway, so make it impossible to skip.
+    """
+    if not ref:
+        return None
+    root = assets_dir(paper_id, base).resolve()
+    candidate = (root / str(ref)).resolve()
+    # Containment check: `ref` comes out of a JSON file, so treat it as input.
+    if root != candidate and root not in candidate.parents:
+        logger.warning(f"Rejected out-of-tree asset ref for {paper_id}: {ref!r}")
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def figure_image(record: Dict[str, Any], entry: Dict[str, Any],
+                 base: Optional[Path] = None) -> Optional[Path]:
+    """The crop for one ``figures[]`` / ``tables[]`` entry, if it is on disk."""
+    return asset_path(record.get("paper_id", ""), entry.get("img_path"), base)
+
+
+def asset_refs(record: Dict[str, Any]) -> List[str]:
+    """Every asset reference the record makes, in block order.
+
+    Includes equation crops: an equation MinerU could not read as LaTeX exists
+    *only* as a picture, so dropping those would lose the content outright.
+    """
+    refs: List[str] = []
+    seen = set()
+    for block in record.get("blocks") or []:
+        ref = block.get("img_path")
+        if ref and ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+    return refs
+
+
+def asset_summary(record: Dict[str, Any], base: Optional[Path] = None) -> Dict[str, Any]:
+    """What the record references vs what is actually on disk."""
+    paper_id = record.get("paper_id", "")
+    refs = asset_refs(record)
+    present = 0
+    total_bytes = 0
+    for ref in refs:
+        path = asset_path(paper_id, ref, base)
+        if path is not None:
+            present += 1
+            try:
+                total_bytes += path.stat().st_size
+            except OSError:
+                pass
+    by_type: Dict[str, int] = {}
+    for block in record.get("blocks") or []:
+        if block.get("img_path"):
+            by_type[block["type"]] = by_type.get(block["type"], 0) + 1
+    return {
+        "dir": f"{paper_id}/{FIGURES_SUBDIR}",
+        "n_referenced": len(refs),
+        "n_present": present,
+        "bytes": total_bytes,
+        "referenced_by_block_type": by_type,
+    }
+
+
+def prune_assets(record: Dict[str, Any], base: Optional[Path] = None) -> Dict[str, Any]:
+    """Delete crops in the paper's figures directory the record does not use.
+
+    Filenames are MinerU content hashes, so a re-extraction of an unchanged
+    paper overwrites the same files and nothing is orphaned.  A re-extraction
+    that *changes* the crops -- a MinerU upgrade, a re-rasterized page, a
+    replaced PDF under the same name -- would otherwise leave the old set behind
+    forever.  Run this immediately after ``build_record``, in the same process
+    that wrote them.
+    """
+    paper_id = record.get("paper_id", "")
+    directory = figures_dir(paper_id, base)
+    keep = {Path(ref).name for ref in asset_refs(record)}
+    removed = 0
+    freed = 0
+    if directory.is_dir():
+        for child in directory.iterdir():
+            if not child.is_file() or child.name in keep:
+                continue
+            if child.suffix.lower() not in ASSET_SUFFIXES:
+                continue                       # never our file; leave it alone
+            try:
+                freed += child.stat().st_size
+                child.unlink()
+                removed += 1
+            except OSError as exc:
+                logger.warning(f"Could not prune {child}: {exc}")
+    return {"removed": removed, "bytes_freed": freed, "kept": len(keep)}
+
+
+def delete_assets(paper_id: str, base: Optional[Path] = None) -> int:
+    """Remove a paper's whole asset directory. Returns files deleted."""
+    directory = assets_dir(paper_id, base)
+    deleted = 0
+    if not directory.is_dir():
+        return 0
+    for child in sorted(directory.rglob("*"), reverse=True):
+        try:
+            if child.is_file():
+                child.unlink()
+                deleted += 1
+            elif child.is_dir():
+                child.rmdir()
+        except OSError as exc:
+            logger.warning(f"Could not delete {child}: {exc}")
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+    return deleted
+
+
+def label_objects(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach a parsed label (``Figure 3``, ``Table II``) to each object.
+
+    Delegates to :mod:`figure_refs`, imported lazily because that module reads
+    this one.  Stored on the record so the API, the chunker and the resolver all
+    agree on one labelling rather than each re-deriving it.
+    """
+    from . import figure_refs
+
+    return figure_refs.label_record_objects(record)
+
+
+def figure_objects(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Figures and tables as one addressable list -- the view the API serves.
+
+    Reading order within the document, each entry carrying its ``figure_id``,
+    page, the rectangle to highlight, its caption text and whether a crop is on
+    disk.  Schema-1 records work: they simply report ``has_image: False``.
+    """
+    blocks = record.get("blocks") or []
+    out: List[Dict[str, Any]] = []
+    for group in ("figures", "tables"):
+        for n, entry in enumerate(record.get(group) or []):
+            kind = entry.get("kind") or ("table" if group == "tables" else "figure")
+            figure_id = entry.get("figure_id") or f"{kind}_{n}"
+            caption = " ".join(
+                blocks[i]["text"] for i in entry.get("caption_blocks", [])
+                if 0 <= i < len(blocks)
+            ).strip()
+            footnote = " ".join(
+                blocks[i]["text"] for i in entry.get("footnote_blocks", [])
+                if 0 <= i < len(blocks)
+            ).strip()
+            out.append({
+                "figure_id": figure_id,
+                "kind": kind,
+                "index": entry.get("index", n),
+                "block": entry.get("block"),
+                "page_idx": entry.get("page_idx"),
+                "page": (entry.get("page_idx") + 1
+                         if entry.get("page_idx") is not None else None),
+                # The rectangle to highlight: the picture itself where
+                # middle_json gave it to us, else MinerU's figure-group box
+                # (picture + caption), which still contains the picture.
+                "bbox": entry.get("image_bbox") or entry.get("bbox"),
+                "group_bbox": entry.get("bbox"),
+                "bbox_is_image": bool(entry.get("image_bbox")),
+                "label": entry.get("label"),
+                "label_kind": entry.get("label_kind"),
+                "label_number": entry.get("label_number"),
+                "label_source": entry.get("label_source"),
+                "caption": caption,
+                "footnote": footnote,
+                "caption_blocks": list(entry.get("caption_blocks", [])),
+                "section_id": entry.get("section_id"),
+                "img_path": entry.get("img_path"),
+                "has_body": entry.get("has_body"),
+                "n_rows": entry.get("n_rows"),
+                "n_cols": entry.get("n_cols"),
+            })
+    out.sort(key=lambda e: (e["page_idx"] if e["page_idx"] is not None else 0,
+                            e["block"] if e["block"] is not None else 0))
+    return out
+
+
+def figure_object(record: Dict[str, Any], figure_id: str) -> Optional[Dict[str, Any]]:
+    """One ``figures[]``/``tables[]`` entry by ``figure_id``, or ``None``."""
+    kind, _, index = str(figure_id).rpartition("_")
+    group = {"figure": "figures", "table": "tables"}.get(kind)
+    if group is None or not index.isdigit():
+        return None
+    entries = record.get(group) or []
+    n = int(index)
+    if 0 <= n < len(entries):
+        return entries[n]
+    return None
 
 
 def locate(record: Dict[str, Any], doc_offset: int) -> Optional[Dict[str, Any]]:

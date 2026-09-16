@@ -17,7 +17,6 @@ Uses MinerU (PDF-Extract-Kit) for:
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import logging
-import tempfile
 import json
 import re
 from dataclasses import dataclass
@@ -95,8 +94,51 @@ def _cross_page_map(pdf_info) -> Dict[Tuple[int, Tuple[int, ...]], int]:
     return out
 
 
+def _image_body_map(pdf_info) -> Dict[Tuple[int, Tuple[int, ...]], List[int]]:
+    """The *picture's own* rectangle for each image/table group.
+
+    ``content_list`` gives one bbox per image or table item, and it is the
+    **group** rectangle -- picture plus caption plus footnote.  Highlighting that
+    box in a PDF viewer covers the caption too, and it is not what the crop on
+    disk shows.  The picture's own box exists only in ``middle_json``, nested in
+    ``para_blocks[i]["blocks"]`` as the ``image_body`` / ``table_body`` child.
+
+    Keyed the same way ``_cross_page_map`` is -- on ``(page_idx, scaled group
+    bbox)`` -- because that key is exactly what ``make_blocks_to_content_list``
+    writes out, which is what lets the two views be joined at all.
+    """
+    from mineru.utils.enum_class import BlockType
+
+    bodies = {BlockType.IMAGE_BODY, BlockType.TABLE_BODY}
+    out: Dict[Tuple[int, Tuple[int, ...]], List[int]] = {}
+    for page in pdf_info or []:
+        page_idx = page.get("page_idx")
+        size = page.get("page_size") or []
+        if page_idx is None or len(size) != 2 or not size[0] or not size[1]:
+            continue
+        width, height = size
+
+        def scale(box):
+            return [int(box[0] * 1000 / width), int(box[1] * 1000 / height),
+                    int(box[2] * 1000 / width), int(box[3] * 1000 / height)]
+
+        for block in page.get("para_blocks") or []:
+            if block.get("type") not in (BlockType.IMAGE, BlockType.TABLE):
+                continue
+            group = block.get("bbox")
+            if not group or len(group) != 4:
+                continue
+            for child in block.get("blocks") or []:
+                box = child.get("bbox")
+                if child.get("type") in bodies and box and len(box) == 4:
+                    out[(int(page_idx), tuple(scale(group)))] = scale(box)
+                    break
+    return out
+
+
 def _subprocess_mineru_extract(pdf_path_str: str, lang: str, use_gpu: bool,
-                               paper_id: str, result_queue):
+                               paper_id: str, result_queue,
+                               assets_base_str: Optional[str] = None):
     """Run MinerU extraction in an isolated subprocess.
 
     The **paper record is built here, inside the subprocess**, not reconstructed by
@@ -104,6 +146,12 @@ def _subprocess_mineru_extract(pdf_path_str: str, lang: str, use_gpu: bool,
     cross the process boundary, so the pdfium isolation of
     docs/BUG_REPORT_pdfium_deadlock_2026-05-04.md is preserved and the structure
     that W1 depends on is not lost on the way out.
+
+    The figure and table crops are written here too, for the same reason: the
+    image writer is driven from inside ``result_to_middle_json``, so the only
+    place it can point at a durable directory is this process.  It used to point
+    at a ``TemporaryDirectory`` that was removed on exit, which is why every
+    ``img_path`` in the corpus was dangling.
 
     Must be a top-level function for multiprocessing pickling.
     """
@@ -118,54 +166,93 @@ def _subprocess_mineru_extract(pdf_path_str: str, lang: str, use_gpu: bool,
 
     pdf_bytes = read_fn(pdf_path)
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        image_writer = FileBasedDataWriter(tmp_dir)
+    assets_base = Path(assets_base_str) if assets_base_str else None
+    crops_dir = pr.figures_dir(paper_id, assets_base)
+    crops_dir.mkdir(parents=True, exist_ok=True)
 
-        infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled = doc_analyze(
-            [pdf_bytes], [lang], parse_method="auto", formula_enable=True, table_enable=True
-        )
+    # The crop writer's root and MinerU's `img_buket_path` are deliberately two
+    # halves of one path: the writer gets `.../{paper_id}/figures`, the bucket
+    # gets the bare `figures`, so `content_list` carries a record-relative
+    # `figures/<sha256>.jpg` that `paper_record.asset_path` can resolve against
+    # whatever directory the record itself is read from.
+    image_writer = FileBasedDataWriter(str(crops_dir))
+    bucket = pr.FIGURES_SUBDIR
 
-        middle_json = result_to_middle_json(
-            infer_results[0], all_image_lists[0], all_pdf_docs[0],
-            image_writer, lang, ocr_enabled[0]
-        )
+    infer_results, all_image_lists, all_pdf_docs, lang_list, ocr_enabled = doc_analyze(
+        [pdf_bytes], [lang], parse_method="auto", formula_enable=True, table_enable=True
+    )
 
-        pdf_info = middle_json.get("pdf_info", [])
-        markdown = union_make(pdf_info, MakeMode.MM_MD, tmp_dir)
-        content_list = union_make(pdf_info, MakeMode.CONTENT_LIST, tmp_dir)
+    middle_json = result_to_middle_json(
+        infer_results[0], all_image_lists[0], all_pdf_docs[0],
+        image_writer, lang, ocr_enabled[0]
+    )
 
-        record = pr.build_record(
-            content_list=content_list,
-            pdf_info=pdf_info,
-            paper_id=paper_id,
-            file_name=pdf_path.name,
-            pdf_path=pdf_path,
-            extractor_version=_mineru_version(),
-            cross_page_map=_cross_page_map(pdf_info),
-        )
+    pdf_info = middle_json.get("pdf_info", [])
+    markdown = union_make(pdf_info, MakeMode.MM_MD, bucket)
+    content_list = union_make(pdf_info, MakeMode.CONTENT_LIST, bucket)
 
-        result_queue.put({
-            'full_text': pr.body_text(record),
-            'markdown': markdown,
-            'tables': pr.table_texts(record),
-            'figures': [
-                {
-                    'path': record['blocks'][f['block']].get('img_path', ''),
-                    'caption': ' '.join(record['blocks'][c]['text']
-                                        for c in f.get('caption_blocks', [])),
-                    'bbox': f['bbox'],
-                    'page_idx': f['page_idx'],
-                    'block': f['block'],
-                }
-                for f in record['figures']
-            ],
-            'captions': pr.captions(record),
-            'metadata': record['metadata'],
-            'record': record,
-        })
+    record = pr.build_record(
+        content_list=content_list,
+        pdf_info=pdf_info,
+        paper_id=paper_id,
+        file_name=pdf_path.name,
+        pdf_path=pdf_path,
+        extractor_version=_mineru_version(),
+        cross_page_map=_cross_page_map(pdf_info),
+        image_bbox_map=_image_body_map(pdf_info),
+        assets_base=assets_base,
+    )
+
+    # Crop filenames are MinerU content hashes, so re-extracting an unchanged
+    # paper rewrites the same files. Anything left over belongs to a previous
+    # extraction whose crops changed, and would orphan forever otherwise.
+    record['stats']['assets_pruned'] = pr.prune_assets(record, assets_base)
+    record['assets'] = pr.asset_summary(record, assets_base)
+    record['capabilities']['figure_images'] = record['assets']['n_present'] > 0
+
+    result_queue.put({
+        'full_text': pr.body_text(record),
+        'markdown': markdown,
+        'tables': pr.table_texts(record),
+        'figures': [
+            {
+                'figure_id': f.get('figure_id'),
+                'img_path': f.get('img_path'),
+                'path': str(pr.figure_image(record, f, assets_base) or ''),
+                'caption': ' '.join(record['blocks'][c]['text']
+                                    for c in f.get('caption_blocks', [])),
+                'label': f.get('label'),
+                'bbox': f.get('image_bbox') or f['bbox'],
+                'page_idx': f['page_idx'],
+                'block': f['block'],
+            }
+            for f in record['figures']
+        ],
+        'captions': pr.captions(record),
+        'metadata': record['metadata'],
+        'record': record,
+    })
 
 
-def _subprocess_fallback_extract(pdf_path_str: str, paper_id: str, result_queue):
+def _discard_partial_crops(record, assets_base) -> Dict[str, Any]:
+    """Delete crops MinerU wrote before it timed out or crashed.
+
+    MinerU writes each crop during ``result_to_middle_json``, so a run that dies
+    partway leaves real files behind.  The paper then falls through to
+    pypdfium2, whose degraded record has no bboxes or captions and therefore
+    references none of them -- they are unusable *and* invisible, which is
+    exactly how a directory grows without bound.  Pruning against a record that
+    references nothing removes all of them.
+    """
+    try:
+        return pr.prune_assets(record, assets_base)
+    except OSError as exc:
+        logging.getLogger(__name__).warning(f"Could not prune partial crops: {exc}")
+        return {"removed": 0, "bytes_freed": 0, "kept": 0, "error": str(exc)}
+
+
+def _subprocess_fallback_extract(pdf_path_str: str, paper_id: str, result_queue,
+                                 assets_base_str: Optional[str] = None):
     """Run pypdfium2 fallback extraction in an isolated subprocess.
 
     Prevents PDFium native library state corruption in long-running processes.
@@ -180,6 +267,7 @@ def _subprocess_fallback_extract(pdf_path_str: str, paper_id: str, result_queue)
     import pypdfium2 as pdfium
 
     pdf_path = Path(pdf_path_str)
+    assets_base = Path(assets_base_str) if assets_base_str else None
     doc = None
     try:
         doc = pdfium.PdfDocument(pdf_path)
@@ -199,6 +287,7 @@ def _subprocess_fallback_extract(pdf_path_str: str, paper_id: str, result_queue)
             reason=pr.DEGRADED_FALLBACK, pdf_path=pdf_path, page_sizes=page_sizes,
         )
         full_text = "\n\n".join(text_parts)
+        record['stats']['assets_pruned'] = _discard_partial_crops(record, assets_base)
         result_queue.put({
             'full_text': full_text, 'markdown': full_text,
             'tables': [], 'figures': [], 'captions': [],
@@ -208,6 +297,7 @@ def _subprocess_fallback_extract(pdf_path_str: str, paper_id: str, result_queue)
     except Exception as e:
         logging.getLogger(__name__).error(f"Fallback extraction failed in subprocess: {e}")
         record = pr.build_failed_record(paper_id, pdf_path.name, pdf_path=pdf_path)
+        record['stats']['assets_pruned'] = _discard_partial_crops(record, assets_base)
         result_queue.put({
             'full_text': '', 'markdown': '', 'tables': [], 'figures': [], 'captions': [],
             'metadata': record['metadata'], 'record': record,
@@ -266,17 +356,25 @@ class MinerUExtractor:
     # Default timeout for PDF extraction (15 minutes - then fallback to simple extraction)
     DEFAULT_TIMEOUT = 900
 
-    def __init__(self, use_gpu: bool = True, lang: str = "en", timeout: int = DEFAULT_TIMEOUT):
+    def __init__(self, use_gpu: bool = True, lang: str = "en",
+                 timeout: int = DEFAULT_TIMEOUT,
+                 assets_base: Optional[Path] = None):
         """Initialize MinerU extractor.
 
         Args:
             use_gpu: Whether to use GPU acceleration
             lang: Language for OCR ('en', 'ch', etc.)
             timeout: Maximum seconds to wait for extraction (default: 300)
+            assets_base: Root the figure crops are written under, matching the
+                ``base`` the record will be saved with.  ``None`` means the
+                configured ``processed_data/``.  A sample harness must pass its
+                own scratch directory here or it will write crops into the
+                production library.
         """
         self.lang = lang
         self.use_gpu = use_gpu
         self.timeout = timeout
+        self.assets_base = Path(assets_base) if assets_base else None
         self._initialized = False
 
     def _ensure_initialized(self):
@@ -293,7 +391,8 @@ class MinerUExtractor:
             logger.warning(f"MinerU initialization warning: {e}")
             self._initialized = True  # Continue anyway
 
-    def extract(self, pdf_path: Path, paper_id: Optional[str] = None) -> MinerUContent:
+    def extract(self, pdf_path: Path, paper_id: Optional[str] = None,
+                assets_base: Optional[Path] = None) -> MinerUContent:
         """Extract all content from a PDF using MinerU.
 
         Runs extraction in a subprocess to prevent PDFium native library
@@ -304,6 +403,7 @@ class MinerUExtractor:
             pdf_path: Path to PDF file
             paper_id: Stable paper identifier. Defaults to ``md5(filename)[:12]``,
                 which W5's baseline depends on -- do not change the derivation.
+            assets_base: Overrides the instance's crop root for this one call.
 
         Returns:
             MinerUContent with extracted text, tables, figures, and the record.
@@ -311,11 +411,14 @@ class MinerUExtractor:
         import queue
 
         paper_id = paper_id or pr.paper_id_for_filename(pdf_path.name)
+        base = assets_base or self.assets_base
+        base_str = str(base) if base else None
 
         result_queue = multiprocessing.Queue()
         proc = multiprocessing.Process(
             target=_subprocess_mineru_extract,
-            args=(str(pdf_path), self.lang, self.use_gpu, paper_id, result_queue),
+            args=(str(pdf_path), self.lang, self.use_gpu, paper_id,
+                  result_queue, base_str),
         )
         proc.start()
 
@@ -342,7 +445,7 @@ class MinerUExtractor:
         result_queue = multiprocessing.Queue()
         proc = multiprocessing.Process(
             target=_subprocess_fallback_extract,
-            args=(str(pdf_path), paper_id, result_queue),
+            args=(str(pdf_path), paper_id, result_queue, base_str),
         )
         proc.start()
 
@@ -362,11 +465,14 @@ class MinerUExtractor:
                     proc.kill()
 
         # Neither extractor produced anything. Emit a record that is explicitly
-        # marked failed rather than an empty one that looks complete.
+        # marked failed rather than an empty one that looks complete, and drop
+        # any crops the dead MinerU run had already written.
+        failed = pr.build_failed_record(paper_id, pdf_path.name, pdf_path=pdf_path)
+        failed['stats']['assets_pruned'] = _discard_partial_crops(failed, base)
         return MinerUContent(
             full_text="", markdown="", tables=[], figures=[], captions=[],
             metadata={"title": pdf_path.stem, "file_name": pdf_path.name, "num_pages": 0},
-            record=pr.build_failed_record(paper_id, pdf_path.name, pdf_path=pdf_path),
+            record=failed,
         )
 
     # NOTE: the in-process `_extract_with_mineru` and `_fallback_extract` variants
@@ -446,7 +552,16 @@ class MinerUExtractor:
         return captions
 
     def _extract_figures_from_content(self, content_list: List) -> List[Dict]:
-        """Extract figure information from MinerU content list."""
+        """Extract figure information from MinerU content list.
+
+        ``img_path`` here is the *record-relative* crop reference
+        (``figures/<sha256>.jpg``), not an absolute path: the crop lives under
+        ``processed_data/{paper_id}/``, so resolving it needs a paper id.  Use
+        ``paper_record.figure_image`` rather than opening this value directly.
+        Also note the caption key is ``image_caption`` (a list) -- the old
+        ``img_caption`` is not a key MinerU emits, so this returned "" for every
+        figure in the corpus.
+        """
         figures = []
 
         for item in content_list:
@@ -454,9 +569,11 @@ class MinerUExtractor:
                 item_type = item.get("type", "")
                 if item_type == "image":
                     figures.append({
-                        "path": item.get("img_path", ""),
-                        "caption": item.get("img_caption", ""),
-                        "bbox": item.get("bbox", [])
+                        "img_path": item.get("img_path", ""),
+                        "caption": " ".join(
+                            c for c in (item.get("image_caption") or []) if c),
+                        "bbox": item.get("bbox", []),
+                        "page_idx": item.get("page_idx", 0),
                     })
 
         return figures
@@ -548,9 +665,13 @@ class PDFProcessor:
         images = []
         for idx, fig in enumerate(content.figures):
             images.append({
-                'page_number': 1,
+                'page_number': (fig.get('page_idx') or 0) + 1,
                 'image_index': idx,
+                'figure_id': fig.get('figure_id'),
+                # Absolute path to the persisted crop, or "" when MinerU wrote
+                # none. `img_path` is the record-relative reference.
                 'path': fig.get('path', ''),
+                'img_path': fig.get('img_path', ''),
                 'caption': fig.get('caption', ''),
             })
 

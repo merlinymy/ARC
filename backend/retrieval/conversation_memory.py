@@ -274,6 +274,46 @@ class ConversationMemory:
 
         return history
 
+    def history_survives_next_turn(
+        self,
+        history: List[Dict[str, str]],
+        max_tokens: int = 2000,
+    ) -> bool:
+        """Whether `history` will still be a prefix of the next turn's history.
+
+        get_chat_history() rebuilds its window from the newest message backwards,
+        so the list it returns is only an append-only extension of the previous
+        one while there is room for another turn inside the same budget. Once the
+        window is full the oldest messages drop off the front and the replayed
+        prefix changes from messages[0] onwards.
+
+        This matters for prompt caching: a cache breakpoint written at the end of
+        a history that will not survive can never be read back, so it only costs
+        the write premium. Callers use this to decide whether to place one.
+
+        Args:
+            history: The list just returned by get_chat_history()
+            max_tokens: The same budget that was passed to get_chat_history()
+
+        Returns:
+            True if one more turn still fits inside the window.
+        """
+        if not history:
+            return False
+
+        char_limit = max_tokens * 4  # same rough estimate get_chat_history() uses
+        used = sum(len(m.get("content", "")) for m in history)
+
+        # Size the next turn from the largest completed turn seen so far - answers
+        # vary a lot, and an underestimate here produces unreadable cache writes.
+        turn_sizes = [
+            len(self.messages[i].content) + len(self.messages[i + 1].content)
+            for i in range(0, len(self.messages) - 1, 2)
+        ]
+        next_turn = max(turn_sizes) if turn_sizes else 0
+
+        return used + next_turn <= char_limit
+
     def format_context_for_prompt(self) -> str:
         """Format conversation context for inclusion in prompt.
 

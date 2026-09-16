@@ -175,13 +175,18 @@ class PDFService:
                         "media_type": "application/pdf",
                         "data": base64_pdf,
                     },
-                    # Optional: Add cache control for repeated queries
-                    "cache_control": {"type": "ephemeral"}
                 }
                 document_blocks.append(document_block)
                 logger.info(f"Added PDF document: {pdf_info['title']}")
             else:
                 logger.warning(f"Failed to convert PDF: {pdf_info['title']}")
+
+        # One cache breakpoint on the last document caches every document before
+        # it. A marker on each block instead would burn one of the request's four
+        # cache_control slots per PDF - a 400 once five papers are selected, and
+        # sooner once the system prompt and conversation history take slots too.
+        if document_blocks:
+            document_blocks[-1]["cache_control"] = {"type": "ephemeral"}
 
         logger.info(f"Created {len(document_blocks)} document blocks for Claude API")
         return document_blocks

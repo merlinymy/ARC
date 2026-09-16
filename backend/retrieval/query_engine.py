@@ -17,6 +17,7 @@ All results are cached for performance with automatic invalidation.
 
 import logging
 import time
+from collections import OrderedDict
 from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass, field
 
@@ -44,6 +45,104 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 1.0  # seconds
 MAX_RETRY_DELAY = 30.0  # seconds
+
+# Valid values for output_config.effort
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_EFFORT = "high"
+
+# Adaptive thinking is on by default on Opus 5; "summarized" keeps the reasoning
+# visible so streaming clients see progress instead of a dead pause.
+ADAPTIVE_THINKING = {"type": "adaptive", "display": "summarized"}
+
+# Prompt caching. Breakpoints only create an entry when the prefix that precedes
+# them is at least the model's minimum cacheable length; below it the API returns
+# cache_creation_input_tokens == 0 with no error.  Measured with
+# messages.count_tokens against the prompts in this module (Opus 5 floor = 512):
+#
+#   system prompt              concise        detailed
+#   base only                   57- 108  tok   158- 295 tok   <- never cacheable
+#   base + general knowledge   383- 434  tok   484- 621 tok   <- 6/8 detailed types
+#   base + pdf upload          477- 528  tok   578- 715 tok
+#   base + both                803- 854  tok   926-1041 tok   <- always cacheable
+#
+# So the breakpoint has to sit on the *last* system block, not after the stable
+# base: no base prompt in this file reaches 512 tokens on its own.
+CACHE_CONTROL_EPHEMERAL: Dict[str, str] = {"type": "ephemeral"}
+
+# The API rejects a request carrying more than four cache_control markers.
+MAX_CACHE_BREAKPOINTS = 4
+
+# Character budget for the replayed conversation history (see
+# ConversationMemory.get_chat_history). Shared with the cache-stability check so
+# both use the same window.
+HISTORY_TOKEN_BUDGET = 2000
+
+
+def _output_config(effort: str) -> Dict[str, Any]:
+    """Build the `output_config` argument, validating the requested effort level."""
+    return {"effort": effort if effort in EFFORT_LEVELS else DEFAULT_EFFORT}
+
+
+def _mark_cacheable(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach a prompt-cache breakpoint to a content block, in place."""
+    block["cache_control"] = dict(CACHE_CONTROL_EPHEMERAL)
+    return block
+
+
+def _enforce_breakpoint_budget(
+    system_blocks: List[Dict[str, Any]],
+    messages: List[Dict[str, Any]],
+) -> int:
+    """Drop the earliest cache breakpoints until at most four remain.
+
+    Three independent places add markers to an answer request - the system
+    prompt, the replayed conversation history, and the uploaded PDF documents -
+    so the limit is enforced here rather than assumed at each site. Earliest
+    markers go first: a breakpoint placed later covers a longer prefix, so it is
+    worth more per read.
+
+    Returns:
+        The number of breakpoints left on the request.
+    """
+    marked: List[Dict[str, Any]] = [b for b in system_blocks if "cache_control" in b]
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            marked.extend(
+                b for b in content if isinstance(b, dict) and "cache_control" in b
+            )
+
+    excess = len(marked) - MAX_CACHE_BREAKPOINTS
+    if excess > 0:
+        for block in marked[:excess]:
+            block.pop("cache_control", None)
+        logger.warning(
+            "Dropped %d cache breakpoint(s) to stay within the limit of %d",
+            excess,
+            MAX_CACHE_BREAKPOINTS,
+        )
+    return min(len(marked), MAX_CACHE_BREAKPOINTS)
+
+
+def _log_cache_usage(usage: Any, label: str) -> Dict[str, int]:
+    """Log the prompt-cache counters for one request and return them.
+
+    Caching fails silently - a volatile prefix produces correct answers at full
+    price with no error - so these counters are the only evidence it still works.
+    """
+    stats = {
+        "input_tokens": getattr(usage, "input_tokens", 0) or 0,
+        "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+    }
+    logger.info(
+        "[CACHE] %s: uncached=%d written=%d read=%d",
+        label,
+        stats["input_tokens"],
+        stats["cache_creation_input_tokens"],
+        stats["cache_read_input_tokens"],
+    )
+    return stats
 
 
 def retry_with_exponential_backoff(
@@ -441,15 +540,22 @@ def get_effective_addendum(
 class QueryEngine:
     """Full query pipeline with classification, retrieval, and generation."""
 
+    # Bound on the number of per-conversation memories held by the process-wide engine
+    MAX_CONVERSATION_MEMORIES = 32
+
+    # Characters of the parent section sent alongside a matched fine chunk
+    PARENT_CONTEXT_WINDOW = 2000
+
     def __init__(
         self,
         embedder: VoyageEmbedder,
         reranker: CohereReranker,
         store: QdrantStore,
         anthropic_client: Anthropic,
-        claude_model: str = "claude-opus-4-5-20251101",
-        claude_model_fast: str = "claude-3-haiku-20240307",
-        claude_model_classifier: str = "claude-sonnet-4-5-20250929",
+        claude_model: str = "claude-opus-5",
+        claude_model_fast: str = "claude-haiku-4-5",
+        claude_model_classifier: str = "claude-sonnet-5",
+        claude_model_web_search: str = "claude-sonnet-5",
         enable_classification: bool = True,
         enable_expansion: bool = True,
         # New options for advanced features
@@ -485,6 +591,8 @@ class QueryEngine:
         self.store = store
         self.anthropic = anthropic_client
         self.claude_model = claude_model
+        self.claude_model_classifier = claude_model_classifier
+        self.claude_model_web_search = claude_model_web_search
         self.enable_classification = enable_classification
         self.enable_expansion = enable_expansion
         self.enable_hybrid_search = enable_hybrid_search
@@ -521,7 +629,12 @@ class QueryEngine:
             anthropic_client=anthropic_client,
             model=claude_model_fast,
         ) if enable_citation_verification else None
-        self.conversation_memory = ConversationMemory() if enable_conversation_memory else None
+        self.enable_conversation_memory = enable_conversation_memory
+        self._conversation_memories: "OrderedDict[str, ConversationMemory]" = OrderedDict()
+        # Prompt-cache counters from the most recent answer call. Diagnostic only
+        # (last writer wins under concurrency); the authoritative record is the
+        # "[CACHE]" log line written by _log_cache_usage.
+        self.last_answer_usage: Optional[Dict[str, int]] = None
 
         logger.info(
             f"Initialized QueryEngine (cache={enable_caching}, hyde={enable_hyde}, "
@@ -529,13 +642,38 @@ class QueryEngine:
             f"citations={enable_citation_verification}, memory={enable_conversation_memory})"
         )
 
+    def _get_conversation_memory(
+        self,
+        conversation_id: Optional[str] = None,
+    ) -> Optional[ConversationMemory]:
+        """Get the ConversationMemory for a conversation, creating it on first use.
+
+        The engine is a process-wide singleton, so memory is keyed by conversation_id
+        to keep separate chat threads from contaminating each other. The keyed store is
+        a bounded LRU; requests without a conversation_id share one anonymous slot.
+        """
+        if not self.enable_conversation_memory:
+            return None
+
+        key = conversation_id or "__anonymous__"
+        if key in self._conversation_memories:
+            self._conversation_memories.move_to_end(key)
+        else:
+            self._conversation_memories[key] = ConversationMemory()
+            while len(self._conversation_memories) > self.MAX_CONVERSATION_MEMORIES:
+                evicted, _ = self._conversation_memories.popitem(last=False)
+                logger.debug(f"Evicted conversation memory for {evicted}")
+
+        return self._conversation_memories[key]
+
     def query(
         self,
         query: str,
         paper_ids: Optional[List[str]] = None,
         max_chunks_per_paper: Optional[int] = None,
         top_k: Optional[int] = None,
-        temperature: Optional[float] = None,
+        effort: Optional[str] = None,
+        conversation_id: Optional[str] = None,
         progress_callback: Optional[callable] = None,
         query_type_override: Optional[str] = None,
         enable_hyde_override: Optional[bool] = None,
@@ -554,7 +692,8 @@ class QueryEngine:
             paper_ids: Optional list of paper IDs to limit search to
             max_chunks_per_paper: Optional user-specified max chunks per paper (None = auto)
             top_k: Optional user-specified number of results to retrieve (None = use strategy default)
-            temperature: Optional user-specified LLM temperature (None = use default 0.3)
+            effort: Optional answer depth - low|medium|high|xhigh|max (None = high)
+            conversation_id: Optional conversation ID that scopes conversation memory
             progress_callback: Optional callback(step_name, step_data) for real-time progress
             query_type_override: Optional query type override (skips classification if provided)
             enable_hyde_override: Optional override for HyDE (None = use system default)
@@ -600,8 +739,9 @@ class QueryEngine:
                 logger.info(f"Invalidated cache due to {len(recently_indexed)} newly indexed papers")
 
         # Step 0: Resolve references from conversation history
-        if self.conversation_memory:
-            resolved_query = self.conversation_memory.resolve_references(query)
+        conversation_memory = self._get_conversation_memory(conversation_id)
+        if conversation_memory:
+            resolved_query = conversation_memory.resolve_references(query)
             if resolved_query != query:
                 logger.debug(f"Resolved references: '{query}' -> '{resolved_query}'")
                 query = resolved_query
@@ -907,11 +1047,11 @@ class QueryEngine:
             if streaming_verifier:
                 streaming_verifier.process_chunk(chunk)
 
-        # Use user-specified temperature or default to 0.3
-        effective_temperature = temperature if temperature is not None else 0.3
+        # Use user-specified effort or fall back to the default depth
+        effective_effort = effort if effort in EFFORT_LEVELS else DEFAULT_EFFORT
 
         # STEP 1: Generate RAG answer first
-        logger.info(f"[QUERY_ENGINE] Starting RAG answer generation with temperature={effective_temperature}")
+        logger.info(f"[QUERY_ENGINE] Starting RAG answer generation with effort={effective_effort}")
         answer = self._generate_answer(
             query=query,
             query_type=query_type,
@@ -921,10 +1061,11 @@ class QueryEngine:
             enable_general_knowledge=enable_general_knowledge,
             enable_web_search=enable_web_search,
             progress_emitter=emit if progress_callback else None,
-            temperature=effective_temperature,
+            effort=effective_effort,
             custom_prompts=custom_prompts,
             paper_ids=paper_ids,
             enable_pdf_upload=enable_pdf_upload,
+            conversation_memory=conversation_memory,
         )
         timing_generation_ms = (time.perf_counter() - timing_generation_start) * 1000
 
@@ -1073,9 +1214,9 @@ class QueryEngine:
             emit("verification", {"skipped": True})
 
         # Step 14: Update conversation memory
-        if self.conversation_memory:
-            self.conversation_memory.add_user_message(query)
-            self.conversation_memory.add_assistant_message(answer, sources=expanded_sources)
+        if conversation_memory:
+            conversation_memory.add_user_message(query)
+            conversation_memory.add_assistant_message(answer, sources=expanded_sources)
 
         # Step 15: Record analytics
         try:
@@ -1183,6 +1324,37 @@ class QueryEngine:
         # Everything else: universal retrieval
         return QueryType.GENERAL
 
+    def _parent_window(self, parent_text: str, child_text: str) -> str:
+        """Take a window of the parent section centred on where the child appears in it.
+
+        Falls back to the head of the section when the child text cannot be located.
+        """
+        if not parent_text:
+            return ""
+        if len(parent_text) <= self.PARENT_CONTEXT_WINDOW:
+            return parent_text
+
+        half = self.PARENT_CONTEXT_WINDOW // 2
+        # The child's stored text may carry a context header, so match on an interior
+        # slice of it rather than the whole string.
+        probe = child_text[:400].strip()
+        offset = parent_text.find(probe) if probe else -1
+        if offset < 0 and len(probe) > 80:
+            offset = parent_text.find(probe[40:200])
+        if offset < 0:
+            return parent_text[:self.PARENT_CONTEXT_WINDOW]
+
+        centre = offset + len(probe) // 2
+        start = max(0, centre - half)
+        end = min(len(parent_text), start + self.PARENT_CONTEXT_WINDOW)
+        start = max(0, end - self.PARENT_CONTEXT_WINDOW)
+        window = parent_text[start:end]
+        if start > 0:
+            window = f"...{window}"
+        if end < len(parent_text):
+            window = f"{window}..."
+        return window
+
     def _expand_fine_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Expand fine chunks by fetching their parent section for context.
 
@@ -1212,9 +1384,11 @@ class QueryEngine:
             for parent_id, indices in parent_id_to_indices.items():
                 parent = parent_by_id.get(parent_id)
                 if parent:
-                    parent_text = parent.get('text', '')[:500]  # First 500 chars
+                    parent_text = parent.get('text', '')
                     for idx in indices:
-                        chunks[idx]['parent_context'] = parent_text
+                        chunks[idx]['parent_context'] = self._parent_window(
+                            parent_text, chunks[idx].get('text', '')
+                        )
 
         return chunks
 
@@ -1228,10 +1402,11 @@ class QueryEngine:
         enable_general_knowledge: bool = True,
         enable_web_search: bool = False,
         progress_emitter: Optional[callable] = None,
-        temperature: float = 0.3,
+        effort: str = DEFAULT_EFFORT,
         custom_prompts: Optional[Dict[str, Any]] = None,
         paper_ids: Optional[List[str]] = None,
         enable_pdf_upload: bool = False,
+        conversation_memory: Optional[ConversationMemory] = None,
     ) -> str:
         """Generate answer using Claude with query-type-specific prompt.
 
@@ -1247,8 +1422,9 @@ class QueryEngine:
             enable_general_knowledge: Whether to allow LLM to supplement with general knowledge
             enable_web_search: Whether to allow Claude to search the web
             progress_emitter: Optional callback(step, data) for progress events
-            temperature: LLM temperature for response generation (default 0.3)
+            effort: Answer depth - low|medium|high|xhigh|max (default high)
             custom_prompts: Optional dict of custom system prompts from user preferences
+            conversation_memory: Conversation memory scoped to this conversation
 
         Returns:
             Complete answer text
@@ -1268,15 +1444,16 @@ class QueryEngine:
         sources_text = self._format_sources(sources) if sources else ""
 
         # Get query-type-specific system prompt (using custom prompts if available)
-        system_prompt = get_effective_prompt(query_type, response_mode, custom_prompts)
+        base_system_prompt = get_effective_prompt(query_type, response_mode, custom_prompts)
         is_custom = custom_prompts and response_mode in custom_prompts and query_type.value in custom_prompts.get(response_mode, {})
 
-        # Set max tokens based on response mode
+        # Set max tokens based on response mode. Adaptive thinking shares this budget
+        # with the answer text, so both modes need headroom above the answer length.
         if response_mode == "detailed":
-            max_tokens = 32768  # More tokens for detailed responses
+            max_tokens = 64000  # More tokens for detailed responses
             logger.info(f"Using DETAILED prompt (custom={is_custom}) with max_tokens={max_tokens}")
         else:
-            max_tokens = 16384
+            max_tokens = 32000
             logger.info(f"Using CONCISE prompt (custom={is_custom}) with max_tokens={max_tokens}")
 
         # Web search requires general knowledge to be enabled
@@ -1284,25 +1461,64 @@ class QueryEngine:
             logger.warning("Web search requires general knowledge - enabling general knowledge")
             enable_general_knowledge = True
 
+        # Build `system` as content blocks rather than one concatenated string:
+        # cache_control attaches to blocks, and separate blocks keep the stable
+        # base prompt byte-identical no matter which addendums follow it.
+        system_blocks: List[Dict[str, Any]] = [
+            {"type": "text", "text": base_system_prompt}
+        ]
+
         # Add general knowledge addendum if enabled (using custom addendum if available)
         if enable_general_knowledge:
-            general_knowledge_addendum = get_effective_addendum("general_knowledge", custom_prompts)
-            system_prompt += general_knowledge_addendum
+            system_blocks.append({
+                "type": "text",
+                "text": get_effective_addendum("general_knowledge", custom_prompts),
+            })
             logger.info("Added general knowledge addendum to system prompt")
 
         # Add PDF upload addendum if enabled (using custom addendum if available)
         if enable_pdf_upload:
-            pdf_upload_addendum = get_effective_addendum("pdf_upload", custom_prompts)
-            system_prompt += pdf_upload_addendum
+            system_blocks.append({
+                "type": "text",
+                "text": get_effective_addendum("pdf_upload", custom_prompts),
+            })
             logger.info("Added PDF upload addendum to system prompt")
+
+        # The breakpoint goes on the last block, which is the only placement that
+        # can clear Opus 5's 512-token floor (see CACHE_CONTROL_EPHEMERAL above).
+        _mark_cacheable(system_blocks[-1])
+        # With both addendums present, also break after the general-knowledge block
+        # so the (base + general knowledge) prefix gets its own entry and toggling
+        # PDF upload reads it instead of rewriting the whole system prompt. That
+        # prefix is 484-621 tokens in detailed mode, so it caches there; in concise
+        # mode it is 383-434 and the API skips it silently.
+        if len(system_blocks) == 3:
+            _mark_cacheable(system_blocks[1])
 
         # Build messages array with conversation history
         messages = []
 
         # Add conversation history (previous turns only - current query not yet in memory)
-        if self.conversation_memory:
-            history = self.conversation_memory.get_chat_history(max_tokens=2000)
+        if conversation_memory:
+            history = conversation_memory.get_chat_history(max_tokens=HISTORY_TOKEN_BUDGET)
             messages.extend(history)
+
+            # Cache the replayed history so later turns read it instead of
+            # re-billing it. Only worth a breakpoint when this history will still
+            # be a prefix of the next turn's history - get_chat_history() rebuilds
+            # the window from the newest message backwards, so once the window is
+            # full the next request starts at a different message and an entry
+            # written here could never be read, leaving only the write premium.
+            if history and conversation_memory.history_survives_next_turn(
+                history, max_tokens=HISTORY_TOKEN_BUDGET
+            ):
+                last = messages[-1]
+                if isinstance(last.get("content"), str):
+                    last["content"] = [{"type": "text", "text": last["content"]}]
+                _mark_cacheable(last["content"][-1])
+                logger.info(
+                    "Cache breakpoint on conversation history (%d messages)", len(history)
+                )
 
         # Add current query with retrieved sources
         # If PDF upload is enabled and we have the service, use it to create a message with PDFs
@@ -1330,29 +1546,51 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
 
             messages.append({"role": "user", "content": current_message})
 
+        breakpoints = _enforce_breakpoint_budget(system_blocks, messages)
+
         # Debug logging
-        logger.info(f"System prompt length: {len(system_prompt)} chars")
+        logger.info(
+            f"System prompt length: {sum(len(b['text']) for b in system_blocks)} chars "
+            f"in {len(system_blocks)} block(s); {breakpoints} cache breakpoint(s)"
+        )
         logger.info(f"Number of sources provided: {len(sources) if sources else 0}")
         logger.info(f"Web search enabled: {enable_web_search}, General knowledge enabled: {enable_general_knowledge}")
 
         try:
             # STEP 1: Generate RAG-based answer (no web search tool)
+            stream_kwargs = {
+                "model": self.claude_model,
+                "max_tokens": max_tokens,
+                "system": system_blocks,
+                "messages": messages,
+                "thinking": ADAPTIVE_THINKING,
+                "output_config": _output_config(effort),
+            }
+
             if stream_callback:
                 # Use streaming API for RAG answer
                 full_response = []
-                stream_kwargs = {
-                    "model": self.claude_model,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "system": system_prompt,
-                    "messages": messages,
-                }
 
                 logger.info("[STREAMING] Starting RAG answer generation with streaming")
                 with self.anthropic.messages.stream(**stream_kwargs) as stream:
-                    for text in stream.text_stream:
-                        full_response.append(text)
-                        stream_callback(text)
+                    for event in stream:
+                        if event.type == "message_start":
+                            # Cache counters arrive with message_start, before any
+                            # content; this is the only proof caching still works.
+                            self.last_answer_usage = _log_cache_usage(
+                                event.message.usage, "answer (streaming)"
+                            )
+                            continue
+                        if event.type != "content_block_delta":
+                            continue
+                        delta = event.delta
+                        if delta.type == "text_delta":
+                            full_response.append(delta.text)
+                            stream_callback(delta.text)
+                        elif delta.type == "thinking_delta" and progress_emitter:
+                            # Kept off the answer stream - the frontend concatenates
+                            # answer_chunk into the rendered answer.
+                            progress_emitter("thinking_chunk", {"chunk": delta.thinking})
 
                 rag_response = "".join(full_response)
 
@@ -1364,22 +1602,18 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
                 # Web search is now handled separately in the query() method
                 return rag_response
             else:
-                # Non-streaming fallback
+                # Non-streaming fallback. Still goes over the streaming transport so
+                # the SDK does not reject these max_tokens values as timeout-prone.
                 def make_api_call():
-                    call_kwargs = {
-                        "model": self.claude_model,
-                        "max_tokens": max_tokens,
-                        "temperature": temperature,
-                        "system": system_prompt,
-                        "messages": messages,
-                    }
-                    return self.anthropic.messages.create(**call_kwargs)
+                    with self.anthropic.messages.stream(**stream_kwargs) as stream:
+                        return stream.get_final_message()
 
                 response = retry_with_exponential_backoff(make_api_call)
+                self.last_answer_usage = _log_cache_usage(response.usage, "answer")
                 # Handle response - extract text from content blocks
                 text_parts = []
                 for block in response.content:
-                    if hasattr(block, 'text'):
+                    if getattr(block, 'type', None) == 'text':
                         text_parts.append(block.text)
                 rag_response = "".join(text_parts) if text_parts else ""
 
@@ -1420,13 +1654,13 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
             web_search_prompt = get_effective_addendum("web_search", custom_prompts)
 
             # Use sonnet for web search (good balance of speed and quality)
-            web_search_model = "claude-sonnet-4-5-20250929"
+            web_search_model = self.claude_model_web_search
 
             logger.info(f"Starting web search with streaming for query: {search_query[:100]}...")
 
             # Prepare the web search tool definition
             tools = [{
-                "type": "web_search_20250305",
+                "type": "web_search_20260209",
                 "name": "web_search",
                 "max_uses": 5
             }]
@@ -1444,8 +1678,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
             # Use the streaming API with text_stream helper
             with self.anthropic.messages.stream(
                 model=web_search_model,
-                max_tokens=32768,
-                temperature=0.5,
+                max_tokens=64000,
                 system=web_search_prompt,
                 messages=web_search_messages,
                 tools=tools,
@@ -1474,16 +1707,19 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
             tool_result_index = -1
             answer_text_blocks = []
 
+            # Match on the wire `type` discriminator, not the Python class name:
+            # the SDK returns subclasses whose __name__ varies (get_final_message()
+            # yields ParsedTextBlock, not TextBlock), while `type` is API contract.
             for i, block in enumerate(final_message.content):
-                block_type = type(block).__name__
-                logger.debug(f"Processing block {i}: {block_type}")
+                block_type = getattr(block, 'type', None)
+                logger.debug(f"Processing block {i}: {block_type} ({type(block).__name__})")
 
-                if block_type == 'ServerToolUseBlock':
+                if block_type == 'server_tool_use':
                     if hasattr(block, 'input') and isinstance(block.input, dict):
                         search_query_text = block.input.get('query', '')
                         logger.info(f"Web search executed query: {search_query_text}")
 
-                elif block_type == 'WebSearchToolResultBlock':
+                elif block_type == 'web_search_tool_result':
                     tool_result_index = i
                     # Extract URLs from search results
                     if hasattr(block, 'content'):
@@ -1495,7 +1731,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
                                 })
                                 logger.debug(f"Found search result: {result.title}")
 
-                elif block_type == 'TextBlock':
+                elif block_type == 'text':
                     text = block.text if hasattr(block, 'text') else ''
                     has_citations = hasattr(block, 'citations') and block.citations
 
@@ -1556,7 +1792,7 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
 
         for i, source in enumerate(sources, 1):
             title = source.get('title', 'Unknown Title')
-            text = source.get('text', '')[:1000]  # Limit text length
+            text = source.get('text', '')
             chunk_type = source.get('chunk_type', 'unknown')
             section = source.get('section_name', '')
             paper_id = source.get('paper_id', '')
@@ -1603,16 +1839,20 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
 
     # Helper methods for advanced features
 
-    def clear_conversation(self) -> None:
-        """Clear conversation memory for a new session."""
-        if self.conversation_memory:
-            self.conversation_memory.clear()
-            logger.info("Cleared conversation memory")
+    def clear_conversation(self, conversation_id: Optional[str] = None) -> None:
+        """Clear conversation memory, for one conversation or for all of them."""
+        if conversation_id:
+            self._conversation_memories.pop(conversation_id, None)
+            logger.info(f"Cleared conversation memory for {conversation_id}")
+        else:
+            self._conversation_memories.clear()
+            logger.info("Cleared all conversation memory")
 
-    def get_conversation_context(self) -> Optional[str]:
+    def get_conversation_context(self, conversation_id: Optional[str] = None) -> Optional[str]:
         """Get formatted conversation context for debugging."""
-        if self.conversation_memory:
-            return self.conversation_memory.format_context_for_prompt()
+        memory = self._conversation_memories.get(conversation_id or "__anonymous__")
+        if memory:
+            return memory.format_context_for_prompt()
         return None
 
     def get_cache_stats(self) -> Dict[str, Any]:
@@ -1628,7 +1868,19 @@ No sources were retrieved from the uploaded papers. Please answer based on your 
             logger.info("Cleared all caches")
 
     def get_conversation_stats(self) -> Dict[str, Any]:
-        """Get conversation statistics."""
-        if self.conversation_memory:
-            return self.conversation_memory.get_stats()
-        return {"enabled": False}
+        """Get conversation statistics aggregated across tracked conversations."""
+        if not self.enable_conversation_memory:
+            return {"enabled": False}
+
+        stats = {
+            "conversations_tracked": len(self._conversation_memories),
+            "total_messages": 0,
+            "user_messages": 0,
+            "papers_discussed": 0,
+            "entities_tracked": 0,
+        }
+        for memory in self._conversation_memories.values():
+            memory_stats = memory.get_stats()
+            for key in ("total_messages", "user_messages", "papers_discussed", "entities_tracked"):
+                stats[key] += memory_stats[key]
+        return stats

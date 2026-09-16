@@ -138,7 +138,7 @@ class QueryRewriter:
     def __init__(
         self,
         anthropic_client=None,
-        model: str = "claude-3-haiku-20240307",
+        model: str = "claude-haiku-4-5",
         enable_llm_rewrite: bool = True,
     ):
         """Initialize query rewriter.

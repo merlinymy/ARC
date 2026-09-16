@@ -14,8 +14,9 @@ Entity types:
 """
 
 import re
+import json
 import logging
-from typing import List, Dict, Set, Optional, Tuple
+from typing import Any, List, Dict, Set, Optional, Tuple
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -204,6 +205,23 @@ class EntityExtractor:
         return score, sorted(list(matched))
 
 
+# Constrains the extractor's output so category keys are always present and always
+# arrays of strings, without temperature (which the SDK no longer sends). The keys
+# mirror exactly the five that `extract()` reads; `other` is never LLM-populated.
+EXTRACTION_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chemicals": {"type": "array", "items": {"type": "string"}},
+        "proteins": {"type": "array", "items": {"type": "string"}},
+        "methods": {"type": "array", "items": {"type": "string"}},
+        "organisms": {"type": "array", "items": {"type": "string"}},
+        "metrics": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["chemicals", "proteins", "methods", "organisms", "metrics"],
+    "additionalProperties": False,
+}
+
+
 class LLMEntityExtractor:
     """LLM-based entity extraction for complex cases."""
 
@@ -223,7 +241,7 @@ Return as JSON:
 
 Only include entities actually mentioned. Return empty lists for missing categories.'''
 
-    def __init__(self, anthropic_client, model: str = "claude-3-haiku-20240307"):
+    def __init__(self, anthropic_client, model: str = "claude-haiku-4-5"):
         """Initialize with Anthropic client."""
         self.anthropic = anthropic_client
         self.model = model
@@ -235,28 +253,26 @@ Only include entities actually mentioned. Return empty lists for missing categor
             response = self.anthropic.messages.create(
                 model=self.model,
                 max_tokens=200,
-                temperature=0,
                 messages=[{
                     "role": "user",
                     "content": self.EXTRACTION_PROMPT.format(query=query)
-                }]
+                }],
+                output_config={
+                    "format": {"type": "json_schema", "schema": EXTRACTION_SCHEMA}
+                },
             )
 
-            # Parse JSON response
-            import json
-            text = response.content[0].text
-            # Find JSON in response
-            start = text.find('{')
-            end = text.rfind('}') + 1
-            if start >= 0 and end > start:
-                data = json.loads(text[start:end])
-                return ExtractedEntities(
-                    chemicals=data.get('chemicals', []),
-                    proteins=data.get('proteins', []),
-                    methods=data.get('methods', []),
-                    organisms=data.get('organisms', []),
-                    metrics=data.get('metrics', []),
-                )
+            text = next(
+                (b.text for b in response.content if getattr(b, 'type', None) == 'text'), ""
+            )
+            data = json.loads(text)
+            return ExtractedEntities(
+                chemicals=data.get('chemicals', []),
+                proteins=data.get('proteins', []),
+                methods=data.get('methods', []),
+                organisms=data.get('organisms', []),
+                metrics=data.get('metrics', []),
+            )
 
         except Exception as e:
             logger.warning(f"LLM entity extraction failed: {e}, using rule-based")

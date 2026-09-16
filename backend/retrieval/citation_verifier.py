@@ -11,12 +11,32 @@ Features:
 """
 
 import re
+import json
 import logging
-from typing import List, Dict, Tuple, Optional
+from typing import Any, List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
+
+
+# Constrains the verifier's output so the verdict is drawn from a fixed set and
+# confidence is a real number, without temperature (which the SDK no longer sends).
+# `minimum`/`maximum` are not supported in structured-output schemas, so the
+# confidence range is clamped after parsing instead.
+VERIFICATION_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["SUPPORTED", "PARTIALLY_SUPPORTED", "NOT_SUPPORTED"],
+        },
+        "confidence": {"type": "number"},
+        "explanation": {"type": "string"},
+    },
+    "required": ["verdict", "confidence", "explanation"],
+    "additionalProperties": False,
+}
 
 
 @dataclass
@@ -61,7 +81,7 @@ class CitationVerifier:
     def __init__(
         self,
         anthropic_client: Optional[Anthropic] = None,
-        model: str = "claude-3-haiku-20240307",
+        model: str = "claude-haiku-4-5",
         use_llm_verification: bool = True,
     ):
         """Initialize citation verifier.
@@ -177,31 +197,33 @@ Claim: "{claim}"
 Source ({source_title}):
 "{source_text[:1500]}"
 
-Answer with:
-1. SUPPORTED, PARTIALLY_SUPPORTED, or NOT_SUPPORTED
-2. Confidence (0-1)
-3. Brief explanation
-
-Format: VERDICT | CONFIDENCE | EXPLANATION'''
+Report:
+- verdict: SUPPORTED, PARTIALLY_SUPPORTED, or NOT_SUPPORTED
+- confidence: how certain you are, between 0 and 1
+- explanation: one brief sentence justifying the verdict'''
 
         try:
             response = self.anthropic.messages.create(
                 model=self.model,
                 max_tokens=150,
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": prompt}],
+                output_config={
+                    "format": {"type": "json_schema", "schema": VERIFICATION_SCHEMA}
+                },
             )
 
-            result = response.content[0].text.strip()
-            parts = result.split('|')
+            text = next(
+                (b.text for b in response.content if getattr(b, 'type', None) == 'text'), ""
+            )
+            data = json.loads(text)
 
-            if len(parts) >= 3:
-                verdict = parts[0].strip().upper()
-                confidence = float(parts[1].strip())
-                explanation = parts[2].strip()
+            verdict = str(data["verdict"]).strip().upper()
+            # Schemas cannot bound a number, so clamp to the 0-1 range callers expect.
+            confidence = max(0.0, min(1.0, float(data["confidence"])))
+            explanation = str(data["explanation"]).strip()
 
-                is_valid = verdict in ["SUPPORTED", "PARTIALLY_SUPPORTED"]
-                return is_valid, confidence, explanation
+            is_valid = verdict in ("SUPPORTED", "PARTIALLY_SUPPORTED")
+            return is_valid, confidence, explanation
 
         except Exception as e:
             logger.warning(f"LLM verification failed: {e}")

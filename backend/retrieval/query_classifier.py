@@ -4,6 +4,7 @@ Classifies user queries to determine the optimal retrieval strategy.
 Different query types benefit from different chunk types and retrieval parameters.
 """
 
+import json
 import logging
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
@@ -109,7 +110,12 @@ RETRIEVAL_STRATEGIES: Dict[QueryType, Dict[str, Any]] = {
 LOW_CONFIDENCE_THRESHOLD = 0.6
 
 
-CLASSIFICATION_PROMPT = '''Classify this research question into exactly one category.
+# The classifier prompt is split so the long, fixed instruction block can carry a
+# prompt-cache breakpoint while the per-query tail stays outside it. Measured at
+# 1,543 tokens with messages.count_tokens, which clears Claude Sonnet 5's
+# 1,024-token minimum cacheable prefix. CLASSIFICATION_PROMPT below is the exact
+# concatenation of the two halves, unchanged from before the split.
+CLASSIFICATION_PROMPT_PREFIX = '''Classify this research question into exactly one category.
 
 Categories:
 - FACTUAL: Asking for specific facts, definitions, numeric values, or mechanisms. The answer is objective and verifiable. Examples: "What is the IC50?", "What mutations cause resistance?", "What is the molecular weight?"
@@ -161,15 +167,36 @@ Query: "How does SRS compare to fluorescence microscopy?"
 Also identify:
 1. Key domain entities (gene names, proteins, techniques, chemicals)
 2. Whether this needs single-paper focus (false) or cross-corpus synthesis (true)
+'''
 
+CLASSIFICATION_PROMPT_QUERY = '''
 Question: {query}
 
-Respond in this exact format:
-QUERY_TYPE: <one of the categories above>
-CONFIDENCE: <0.0-1.0, use lower values if the query doesn't fit well>
-ENTITIES: <comma-separated list or "none">
-CROSS_CORPUS: <true or false>
-REASONING: <brief explanation>'''
+Respond with a JSON object containing:
+- query_type: one of the categories above, lowercase
+- confidence: 0.0-1.0, use lower values if the query doesn't fit well
+- entities: array of domain entities (empty array if none)
+- cross_corpus: true or false
+- reasoning: brief explanation'''
+
+# Preserved for callers (and the settings UI) that want the whole prompt.
+CLASSIFICATION_PROMPT = CLASSIFICATION_PROMPT_PREFIX + CLASSIFICATION_PROMPT_QUERY
+
+
+# Constrains the classifier's output so category selection is stable without
+# temperature, which the classifier model no longer accepts.
+CLASSIFICATION_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query_type": {"type": "string", "enum": [qt.value for qt in QueryType]},
+        "confidence": {"type": "number"},
+        "entities": {"type": "array", "items": {"type": "string"}},
+        "cross_corpus": {"type": "boolean"},
+        "reasoning": {"type": "string"},
+    },
+    "required": ["query_type", "confidence", "entities", "cross_corpus", "reasoning"],
+    "additionalProperties": False,
+}
 
 
 MULTI_CLASSIFICATION_PROMPT = '''Classify this research question into the TOP 3 most relevant categories, ranked by relevance.
@@ -203,7 +230,7 @@ class QueryClassifier:
     def __init__(
         self,
         anthropic_client: Anthropic,
-        model: str = "claude-sonnet-4-5-20250929"
+        model: str = "claude-sonnet-5"
     ):
         """Initialize classifier.
 
@@ -213,6 +240,8 @@ class QueryClassifier:
         """
         self.client = anthropic_client
         self.model = model
+        # Prompt-cache counters from the most recent classify() call (diagnostic).
+        self.last_classify_usage: Optional[Dict[str, int]] = None
 
     def classify(self, query: str) -> QueryClassification:
         """Classify a query.
@@ -223,22 +252,70 @@ class QueryClassifier:
         Returns:
             QueryClassification with type and retrieval strategy
         """
-        prompt = CLASSIFICATION_PROMPT.format(query=query)
+        # Two text blocks instead of one string: same rendered prompt, but the
+        # fixed instruction half can carry a cache breakpoint.
+        content = [
+            {
+                "type": "text",
+                "text": CLASSIFICATION_PROMPT_PREFIX,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "type": "text",
+                "text": CLASSIFICATION_PROMPT_QUERY.format(query=query),
+            },
+        ]
 
         try:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=500,
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": content}],
+                output_config={
+                    "effort": "low",
+                    "format": {"type": "json_schema", "schema": CLASSIFICATION_SCHEMA},
+                },
+            )
+            usage = response.usage
+            self.last_classify_usage = {
+                "input_tokens": getattr(usage, "input_tokens", 0) or 0,
+                "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+                "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+            }
+            logger.info(
+                "[CACHE] classifier: uncached=%d written=%d read=%d",
+                self.last_classify_usage["input_tokens"],
+                self.last_classify_usage["cache_creation_input_tokens"],
+                self.last_classify_usage["cache_read_input_tokens"],
             )
 
-            return self._parse_response(response.content[0].text, query)
+            text = next(
+                (b.text for b in response.content if getattr(b, 'type', None) == 'text'), ""
+            )
+            parsed = self._parse_json_response(text)
+            if parsed:
+                return parsed
+            return self._parse_response(text, query)
 
         except Exception as e:
             logger.error(f"Classification failed: {e}")
             # Default to factual on error
             return self._default_classification(query)
+
+    def _parse_json_response(self, response: str) -> Optional[QueryClassification]:
+        """Parse the structured-output JSON response, or None if it isn't parseable."""
+        try:
+            data = json.loads(response)
+            query_type = QueryType(data["query_type"].lower())
+            confidence = float(data["confidence"])
+            entities = [str(e).strip() for e in data.get("entities", []) if str(e).strip()]
+            cross_corpus = bool(data.get("cross_corpus", False))
+            reasoning = str(data.get("reasoning", ""))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as e:
+            logger.warning(f"Structured classification output not parseable, falling back: {e}")
+            return None
+
+        return self._build_classification(query_type, confidence, entities, cross_corpus, reasoning)
 
     def _parse_response(self, response: str, query: str) -> QueryClassification:
         """Parse Claude's classification response."""
@@ -276,7 +353,17 @@ class QueryClassifier:
             elif line.startswith("REASONING:"):
                 reasoning = line.split(":", 1)[1].strip()
 
-        # Fall back to GENERAL if confidence is low
+        return self._build_classification(query_type, confidence, entities, cross_corpus, reasoning)
+
+    def _build_classification(
+        self,
+        query_type: QueryType,
+        confidence: float,
+        entities: list,
+        cross_corpus: bool,
+        reasoning: str,
+    ) -> QueryClassification:
+        """Attach the retrieval strategy, downgrading low-confidence types to GENERAL."""
         if confidence < LOW_CONFIDENCE_THRESHOLD and query_type != QueryType.GENERAL:
             logger.info(f"Low confidence ({confidence:.2f}) for {query_type.value}, falling back to GENERAL")
             query_type = QueryType.GENERAL
@@ -326,11 +413,16 @@ class QueryClassifier:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=300,
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}]
+                messages=[{"role": "user", "content": prompt}],
+                output_config={"effort": "low"},
             )
 
-            return self._parse_multi_response(response.content[0].text, query)
+            # Pick the text block by wire type rather than assuming index 0:
+            # thinking is default-on for this model tier and can precede it.
+            text = next(
+                (b.text for b in response.content if getattr(b, 'type', None) == 'text'), ""
+            )
+            return self._parse_multi_response(text, query)
 
         except Exception as e:
             logger.error(f"Multi-classification failed: {e}")

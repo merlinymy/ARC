@@ -58,7 +58,7 @@ class LLMFilter:
     def __init__(
         self,
         api_key: str,
-        model: str = "claude-opus-4-5-20251101",
+        model: str = "claude-opus-5",
         max_text_chars: int = 2000,
     ):
         self.client = Anthropic(api_key=api_key)
@@ -123,7 +123,6 @@ class LLMFilter:
                 response = self.client.messages.create(
                     model=self.model,
                     max_tokens=200,
-                    temperature=0,
                     messages=[{"role": "user", "content": prompt}]
                 )
 

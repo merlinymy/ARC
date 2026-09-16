@@ -55,13 +55,23 @@ Include specific facts, values, or mechanisms:''',
 }
 
 
+# Diversity axis for generate_multiple(). Sampling temperature used to supply the
+# variation between the three hypothetical documents, but the API no longer accepts
+# it, so the variation now comes from the prompt instead: three different section
+# framings of the same question, reusing HYDE_PROMPT_BY_TYPE above rather than
+# duplicating it. "methods" pulls protocol and reagent language, "results" pulls
+# data and numeric findings, "discussion" pulls background and mechanism - so the
+# three embeddings land in genuinely different neighbourhoods of the corpus.
+HYDE_DIVERSITY_FRAMINGS = ("methods", "results", "discussion")
+
+
 class HyDE:
     """Hypothetical Document Embeddings for improved retrieval."""
 
     def __init__(
         self,
         anthropic_client: Anthropic,
-        model: str = "claude-3-haiku-20240307",  # Use fast model for HyDE
+        model: str = "claude-haiku-4-5",  # Use fast model for HyDE
         enabled: bool = True,
     ):
         """Initialize HyDE.
@@ -104,7 +114,6 @@ class HyDE:
             response = self.anthropic.messages.create(
                 model=self.model,
                 max_tokens=500,
-                temperature=0.7,  # Some creativity for diversity
                 messages=[{"role": "user", "content": prompt}]
             )
 
@@ -141,23 +150,22 @@ class HyDE:
             return [query]
 
         hypotheticals = []
-        temperatures = [0.5, 0.7, 0.9]  # Varying temperatures for diversity
 
-        for i in range(min(n, len(temperatures))):
+        # One call per framing; n caps how many framings are used.
+        for framing in HYDE_DIVERSITY_FRAMINGS[:n]:
             try:
-                prompt = HYDE_PROMPT.format(query=query)
+                prompt = HYDE_PROMPT_BY_TYPE[framing].format(query=query)
 
                 response = self.anthropic.messages.create(
                     model=self.model,
                     max_tokens=400,
-                    temperature=temperatures[i],
                     messages=[{"role": "user", "content": prompt}]
                 )
 
                 hypotheticals.append(response.content[0].text.strip())
 
             except Exception as e:
-                logger.warning(f"HyDE multi-generation {i} failed: {e}")
+                logger.warning(f"HyDE multi-generation ({framing}) failed: {e}")
 
         return hypotheticals if hypotheticals else [query]
 

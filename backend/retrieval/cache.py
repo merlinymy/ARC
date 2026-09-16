@@ -165,9 +165,11 @@ class RAGCache:
         query: str,
         chunk_types: Optional[List[str]] = None,
         section_filter: Optional[List[str]] = None,
+        paper_ids: Optional[List[str]] = None,
+        top_k: Optional[int] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """Get cached search results."""
-        key = self._search_key(query, chunk_types, section_filter)
+        key = self._search_key(query, chunk_types, section_filter, paper_ids, top_k)
         return self.search_cache.get(key)
 
     def set_search_results(
@@ -176,9 +178,11 @@ class RAGCache:
         results: List[Dict[str, Any]],
         chunk_types: Optional[List[str]] = None,
         section_filter: Optional[List[str]] = None,
+        paper_ids: Optional[List[str]] = None,
+        top_k: Optional[int] = None,
     ) -> None:
         """Cache search results."""
-        key = self._search_key(query, chunk_types, section_filter)
+        key = self._search_key(query, chunk_types, section_filter, paper_ids, top_k)
         self.search_cache.set(key, results)
 
     def _search_key(
@@ -186,13 +190,26 @@ class RAGCache:
         query: str,
         chunk_types: Optional[List[str]],
         section_filter: Optional[List[str]],
+        paper_ids: Optional[List[str]] = None,
+        top_k: Optional[int] = None,
     ) -> str:
-        """Generate search cache key."""
+        """Generate search cache key.
+
+        `paper_ids` and `top_k` are part of the key: without them a
+        paper-scoped query and a corpus-wide query with the same text share a
+        cache entry, and the first one to run decides what the other sees.
+        That was survivable while `chunk_types` varied per query type; with one
+        broad path (§4b) the text is the only thing left that differs.
+        """
         parts = [query]
         if chunk_types:
             parts.append(f"types:{','.join(sorted(chunk_types))}")
         if section_filter:
             parts.append(f"sections:{','.join(sorted(section_filter))}")
+        if paper_ids:
+            parts.append(f"papers:{','.join(sorted(paper_ids))}")
+        if top_k:
+            parts.append(f"k:{top_k}")
         return hashlib.md5("|".join(parts).encode()).hexdigest()
 
     def get_hyde_answer(self, query: str) -> Optional[str]:

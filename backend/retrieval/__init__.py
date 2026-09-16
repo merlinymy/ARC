@@ -8,6 +8,8 @@ from .query_classifier import (
     QueryClassification,
     MultiQueryClassification,
     RETRIEVAL_STRATEGIES,
+    BROAD_RETRIEVAL,
+    RESPONSE_SHAPE,
     classify_query_heuristic,
 )
 from .embedder import VoyageEmbedder
@@ -38,6 +40,8 @@ __all__ = [
     "QueryClassification",
     "MultiQueryClassification",
     "RETRIEVAL_STRATEGIES",
+    "BROAD_RETRIEVAL",
+    "RESPONSE_SHAPE",
     "classify_query_heuristic",
     # Embedder
     "VoyageEmbedder",

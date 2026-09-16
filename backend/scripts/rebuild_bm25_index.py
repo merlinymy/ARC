@@ -57,6 +57,7 @@ if str(BACKEND_DIR) not in sys.path:
 from qdrant_client import QdrantClient  # noqa: E402
 from qdrant_client.models import PointVectors, SparseVector as QdrantSparseVector  # noqa: E402
 
+from preprocessing.models import BM25_PAYLOAD_FIELDS, embed_text_from_payload  # noqa: E402
 from retrieval.bm25 import (  # noqa: E402
     BM25Vectorizer,
     DEFAULT_MAX_VOCAB_SIZE,
@@ -186,14 +187,17 @@ def pass1(args: argparse.Namespace) -> int:
                 collection_name=coll,
                 limit=SCROLL_BATCH,
                 offset=offset,
-                with_payload=["text"],
+                with_payload=BM25_PAYLOAD_FIELDS,
                 with_vectors=False,  # never pull the 1024-dim dense vectors
             )
             if not points:
                 break
 
             for pt in points:
-                text = (pt.payload or {}).get("text") or ""
+                # W2: BM25 indexes `embed_text`, recomposed from the payload
+                # parts, so the sparse vectors describe the same document the
+                # dense vectors were built from.
+                text = embed_text_from_payload(pt.payload or {})
                 tokens = vectorizer.tokenize(text)
                 tf = Counter(tokens)
                 doc_count += 1

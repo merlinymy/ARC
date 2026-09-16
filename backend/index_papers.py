@@ -238,31 +238,23 @@ def index_single_paper(
             checkpoint.mark_failed(paper_id, "No chunks extracted")
             return stats
 
-        # Step 2: Generate embeddings for all chunks
-        texts = [chunk.text for chunk in chunks]
+        # Step 2: Generate embeddings for all chunks.
+        # W2: `embed_text` (context line + span), not the bare verbatim `text` —
+        # that split is what makes contextual retrieval and byte-exact citation
+        # quotes compatible instead of mutually exclusive.
+        texts = [chunk.embed_text for chunk in chunks]
         embeddings = embedder.embed_documents(texts)
 
         # Step 3: Create full-paper embedding via mean pooling
         # Use section and abstract chunks for the full embedding (skip fine to avoid duplication)
-        pooling_texts = [c.text for c in chunks if c.chunk_type in [ChunkType.ABSTRACT, ChunkType.SECTION]]
+        pooling_texts = [c.embed_text for c in chunks
+                         if c.chunk_type in [ChunkType.ABSTRACT, ChunkType.SECTION]]
         if pooling_texts:
             full_embedding = embedder.compute_mean_pooled_embedding(pooling_texts)
-
-            # Create a FULL chunk for paper-level retrieval
-            full_chunk = Chunk(
-                chunk_id=f"{paper_id}_full",
-                paper_id=paper_id,
-                chunk_type=ChunkType.FULL,
-                text=f"[Full paper: {chunks[0].title}]",  # Placeholder text
-                title=chunks[0].title,
-                authors=chunks[0].authors,
-                year=chunks[0].year,
-                project_tag=chunks[0].project_tag,
-                research_area=chunks[0].research_area,
-                file_name=chunks[0].file_name,
-            )
-            chunks.append(full_chunk)
-            embeddings.append(full_embedding)
+            full_chunk = processor.chunker.make_full_chunk(chunks)
+            if full_chunk is not None:
+                chunks.append(full_chunk)
+                embeddings.append(full_embedding)
 
         # Step 4: Prepare data for Qdrant
         chunk_ids = [chunk.chunk_id for chunk in chunks]
@@ -279,7 +271,7 @@ def index_single_paper(
         # doc_freq and doc_count have to describe the same population the BM25 query
         # vectors are scored against. Restricting this to abstract+section is what left
         # the IDF table at doc_count=13,979 while 212,953 chunks were indexed.
-        stats["texts"] = [c.text for c in chunks]
+        stats["texts"] = [c.embed_text for c in chunks]
 
         # Count by type
         type_counts = {}

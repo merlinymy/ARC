@@ -947,8 +947,10 @@ class PaperLibraryService:
 
             emit_progress("embedding", {"message": f"Generating embeddings for {len(chunks)} chunks...", "sub_progress": 0.0})
 
-            # Generate embeddings with per-batch progress
-            texts = [chunk.text for chunk in chunks]
+            # Generate embeddings with per-batch progress.
+            # W2: `embed_text` (context line + verbatim span), never the bare
+            # `text` — see preprocessing/models.py for the three-field contract.
+            texts = [chunk.embed_text for chunk in chunks]
 
             def embedding_progress(batch_idx: int, total_batches: int):
                 sub = batch_idx / total_batches if total_batches > 0 else 1.0
@@ -960,24 +962,14 @@ class PaperLibraryService:
             embeddings = self.embedder.embed_documents(texts, progress_callback=embedding_progress)
 
             # Create full-paper embedding
-            pooling_texts = [c.text for c in chunks if c.chunk_type in [ChunkType.ABSTRACT, ChunkType.SECTION]]
+            pooling_texts = [c.embed_text for c in chunks
+                             if c.chunk_type in [ChunkType.ABSTRACT, ChunkType.SECTION]]
             if pooling_texts:
                 full_embedding = self.embedder.compute_mean_pooled_embedding(pooling_texts)
-
-                full_chunk = Chunk(
-                    chunk_id=f"{paper_id}_full",
-                    paper_id=paper_id,
-                    chunk_type=ChunkType.FULL,
-                    text=f"[Full paper: {chunks[0].title}]",
-                    title=chunks[0].title,
-                    authors=chunks[0].authors,
-                    year=chunks[0].year,
-                    project_tag=chunks[0].project_tag,
-                    research_area=chunks[0].research_area,
-                    file_name=chunks[0].file_name,
-                )
-                chunks.append(full_chunk)
-                embeddings.append(full_embedding)
+                full_chunk = processor.chunker.make_full_chunk(chunks)
+                if full_chunk is not None:
+                    chunks.append(full_chunk)
+                    embeddings.append(full_embedding)
 
             emit_progress("indexing", {
                 "message": f"Storing {len(chunks)} chunks in vector database...",

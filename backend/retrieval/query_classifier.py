@@ -50,7 +50,69 @@ class MultiQueryClassification:
     reasoning: str
 
 
-# Retrieval strategies per query type
+# ---------------------------------------------------------------------------
+# One broad retrieval path (W2 item 7 / §4b, measured in W5)
+# ---------------------------------------------------------------------------
+#
+# W5 settled this by measurement rather than argument, and the result was not
+# the one the original design assumed:
+#
+#   * both classifier-routed arms lose to a single broad hybrid path
+#     (nDCG@20 -0.149, p=.0002), and
+#   * the LLM classifier is no better than the keyword matcher that is actually
+#     running in production (p=.55, with ENABLE_QUERY_CLASSIFICATION=false).
+#
+# The mechanism is that `chunk_types` and `section_filter` below are `must`
+# filters — exclusions applied *before* scoring. A METHODS-routed query can only
+# be scored against 7.0% of the corpus, so a correct answer outside that slice is
+# invisible rather than merely ranked low. That is a soft judgement compiled into
+# a hard constraint, and it is why "it consistently misses things".
+#
+# So production retrieves widely and lets the reranker sort it out. Depth barely
+# matters (200 vs 100 candidates: +0.007, p=.70), so this buys no latency it
+# cannot justify.
+BROAD_RETRIEVAL: Dict[str, Any] = {
+    # None means "no chunk_type filter" — every type is in scope, including the
+    # `table` chunks W1/W2 make exist for the first time.
+    "chunk_types": None,
+    "section_filter": None,
+    "top_k": 100,
+    "rerank_top_n": 20,
+    "max_per_paper": 3,
+}
+
+#: Post-retrieval shaping per query type. These are *not* exclusions: nothing is
+#: made invisible, so a misclassification costs ranking, not recall. `QueryType`
+#: keeps its place as this soft signal (and as W3's stance hint), not as a router.
+RESPONSE_SHAPE: Dict[QueryType, Dict[str, Any]] = {
+    QueryType.FACTUAL:     {"rerank_top_n": 15, "max_per_paper": 3},
+    QueryType.FRAMING:     {"rerank_top_n": 20, "max_per_paper": 2},
+    QueryType.METHODS:     {"rerank_top_n": 15, "max_per_paper": 5},
+    QueryType.SUMMARY:     {"rerank_top_n": 10, "max_per_paper": 10},
+    QueryType.COMPARATIVE: {"rerank_top_n": 25, "max_per_paper": 2},
+    QueryType.NOVELTY:     {"rerank_top_n": 20, "max_per_paper": 3},
+    QueryType.LIMITATIONS: {"rerank_top_n": 15, "max_per_paper": 4},
+    QueryType.GENERAL:     {"rerank_top_n": 20, "max_per_paper": 3},
+}
+
+#: Soft, post-retrieval score multipliers for section affinity — the "soft
+#: boosts where evidence supports them" half of §4b. The mechanism exists so W5
+#: can measure it; the weights are 1.0 (no-op) until it does. W5's isolated
+#: filter variable was only directional (-0.051, p=.14, underpowered at n=50),
+#: which is not enough to justify a thumb on the scale in either direction.
+SECTION_BOOSTS: Dict[QueryType, Dict[str, float]] = {
+    QueryType.METHODS: {"methods": 1.0, "experimental": 1.0, "synthesis": 1.0},
+    QueryType.LIMITATIONS: {"discussion": 1.0, "conclusion": 1.0},
+    QueryType.NOVELTY: {"introduction": 1.0, "discussion": 1.0, "conclusion": 1.0},
+}
+
+# Retrieval strategies per query type.
+#
+# **Superseded by BROAD_RETRIEVAL for production retrieval (W2/§4b).** Kept
+# because `evaluation/` measures against it: this dict is the "routed" arm of
+# the W5 comparison, and deleting it would make that measurement irreproducible.
+# Do not add a new consumer — a hard `chunk_types`/`section_filter` pair is the
+# defect, not the configuration.
 RETRIEVAL_STRATEGIES: Dict[QueryType, Dict[str, Any]] = {
     QueryType.FACTUAL: {
         "chunk_types": ["fine", "table", "caption"],
@@ -369,34 +431,41 @@ class QueryClassifier:
             query_type = QueryType.GENERAL
             reasoning = f"Low confidence classification, using general strategy. Original: {reasoning}"
 
-        strategy = RETRIEVAL_STRATEGIES[query_type]
-
+        # The suggested values report what retrieval will actually do, which is
+        # the broad path (§4b) — not a per-type chunk_types list that nothing
+        # reads any more. Reporting the old list would put a filter in the UI's
+        # progress payload that is not being applied.
         return QueryClassification(
             query_type=query_type,
             confidence=confidence,
             entities=entities,
             needs_cross_corpus=cross_corpus,
-            suggested_chunk_types=strategy["chunk_types"],
-            suggested_top_k=strategy["top_k"],
+            suggested_chunk_types=BROAD_RETRIEVAL["chunk_types"],
+            suggested_top_k=BROAD_RETRIEVAL["top_k"],
             reasoning=reasoning,
         )
 
     def _default_classification(self, query: str) -> QueryClassification:
         """Return default classification when parsing fails."""
-        strategy = RETRIEVAL_STRATEGIES[QueryType.GENERAL]
         return QueryClassification(
             query_type=QueryType.GENERAL,
             confidence=0.5,
             entities=[],
             needs_cross_corpus=False,
-            suggested_chunk_types=strategy["chunk_types"],
-            suggested_top_k=strategy["top_k"],
+            suggested_chunk_types=BROAD_RETRIEVAL["chunk_types"],
+            suggested_top_k=BROAD_RETRIEVAL["top_k"],
             reasoning="Default classification due to parsing error",
         )
 
     def get_retrieval_strategy(self, query_type: QueryType) -> Dict[str, Any]:
-        """Get retrieval strategy for a query type."""
-        return RETRIEVAL_STRATEGIES.get(query_type, RETRIEVAL_STRATEGIES[QueryType.GENERAL])
+        """Retrieval parameters for a query type.
+
+        One broad path plus per-type *shaping* (§4b). The per-type
+        `chunk_types` / `section_filter` exclusions are gone; only
+        `evaluation/` still reads `RETRIEVAL_STRATEGIES`, to reproduce the
+        routed arm W5 measured.
+        """
+        return {**BROAD_RETRIEVAL, **RESPONSE_SHAPE.get(query_type, {})}
 
     def classify_multi(self, query: str) -> MultiQueryClassification:
         """Classify a query into top 3 categories for broader retrieval.

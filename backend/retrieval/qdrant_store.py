@@ -22,6 +22,8 @@ from qdrant_client.models import (
     PayloadSchemaType,
 )
 
+from preprocessing.models import embed_text_from_payload
+
 from .bm25 import BM25Vectorizer, SparseVector, HybridSearchMixer
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,11 @@ class QdrantStore:
             ("chunk_type", PayloadSchemaType.KEYWORD),
             ("paper_id", PayloadSchemaType.KEYWORD),
             ("section_name", PayloadSchemaType.KEYWORD),
+            # W2: numeric facts, so "what is the MIC of Api137" can be answered
+            # by a lookup rather than only by hoping the right prose chunk ranks.
+            ("numeric_properties", PayloadSchemaType.KEYWORD),
+            ("numeric_entities", PayloadSchemaType.KEYWORD),
+            ("has_numeric_facts", PayloadSchemaType.BOOL),
         ]
 
         for field_name, schema_type in indices_to_create:
@@ -189,7 +196,10 @@ class QdrantStore:
                 # Build vector dict (dense + optional sparse)
                 vector_data: Any = embedding
                 if self.enable_hybrid and self.bm25_vectorizer:
-                    text = payload.get('text', '')
+                    # W2: BM25 indexes `embed_text`, not the bare verbatim span,
+                    # so the sparse and dense vectors describe the same document.
+                    # Recomposed from the payload parts (see models.py).
+                    text = embed_text_from_payload(payload)
                     sparse_vec = self.bm25_vectorizer.vectorize(text, is_query=False)
                     vector_data = {
                         "": embedding,  # Default dense vector

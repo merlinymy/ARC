@@ -1096,20 +1096,21 @@ class EnhancedPDFProcessor:
             except OSError as e:
                 logger.warning(f"Could not persist paper record for {paper_id}: {e}")
 
-        # Get tables and captions from the record (R1/R2). These are MinerU's own
-        # table bodies and caption lists, not regex scrapes of body prose.
-        tables = content.tables
-        captions = content.captions
+        logger.debug(
+            f"Extracted {len(content.tables)} tables, {len(content.captions)} "
+            f"captions from {pdf_path.name}"
+        )
 
-        logger.debug(f"Extracted {len(tables)} tables, {len(captions)} captions from {pdf_path.name}")
-
-        # Create multi-type chunks. The chunk contract itself is W2; this still
-        # calls the existing chunker, now fed with real structure.
+        # Create multi-type chunks **from the record** (W2). The flat-string
+        # arguments are only the fallback for a paper with no record: chunking
+        # from them cannot produce character offsets, pages or a verbatim span,
+        # which is what W3's citations and PDF highlighting need.
         chunks = self.chunker.chunk_paper(
             text=full_text,
             metadata=paper_metadata,
-            captions=captions,
-            tables=tables,
+            captions=content.captions,
+            tables=content.tables,
+            record=record,
         )
 
         logger.info(

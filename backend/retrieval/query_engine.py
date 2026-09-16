@@ -27,7 +27,15 @@ from anthropic import Anthropic, RateLimitError, APIStatusError
 from .embedder import VoyageEmbedder
 from .reranker import CohereReranker, RerankResult
 from .qdrant_store import QdrantStore
-from .query_classifier import QueryClassifier, QueryType, QueryClassification, MultiQueryClassification, RETRIEVAL_STRATEGIES
+from .query_classifier import (
+    QueryClassifier,
+    QueryType,
+    QueryClassification,
+    MultiQueryClassification,
+    BROAD_RETRIEVAL,
+    RESPONSE_SHAPE,
+    RETRIEVAL_STRATEGIES,
+)
 from .query_expander import QueryExpander
 
 # New imports for advanced features
@@ -271,9 +279,11 @@ class QueryResult:
 #   LENGTH_DIAL         how much room the answer may take (response_mode)
 #   output_config.effort  how much thinking the model spends (not a prompt)
 #
-# `QueryType` still exists and still drives RETRIEVAL_STRATEGIES. It no longer
-# selects a prompt: retrieval is a retrieval concern, stance is a generation
-# concern, and conflating them is what produced the book-report voice.
+# `QueryType` still exists, but after W5 it no longer routes retrieval either:
+# there is one broad path (BROAD_RETRIEVAL) and QueryType only shapes how many
+# results come back (RESPONSE_SHAPE). It does not select a prompt: retrieval is
+# a retrieval concern, stance is a generation concern, and conflating them is
+# what produced the book-report voice.
 
 
 class AnswerMode(str, Enum):
@@ -728,14 +738,13 @@ class QueryEngine:
             except ValueError:
                 logger.warning(f"Invalid query_type_override '{query_type_override}', falling back to auto-detection")
                 query_type = self._detect_targeted_query_type(rewritten_query)
-            strategy = RETRIEVAL_STRATEGIES[query_type]
             classification = QueryClassification(
                 query_type=query_type,
                 confidence=1.0,
                 entities=entities_extracted[:5],
                 needs_cross_corpus=True,
-                suggested_chunk_types=strategy["chunk_types"],
-                suggested_top_k=strategy["top_k"],
+                suggested_chunk_types=BROAD_RETRIEVAL["chunk_types"],
+                suggested_top_k=BROAD_RETRIEVAL["top_k"],
                 reasoning=f"User-specified query type: {query_type.value}",
             )
             logger.info(f"Using user-specified query type: {query_type.value}")
@@ -746,15 +755,14 @@ class QueryEngine:
         else:
             # Hybrid approach: targeted retrieval for methods/limitations, universal for rest
             query_type = self._detect_targeted_query_type(rewritten_query)
-            strategy = RETRIEVAL_STRATEGIES[query_type]
             classification = QueryClassification(
                 query_type=query_type,
                 confidence=1.0,
                 entities=entities_extracted[:5],
                 needs_cross_corpus=True,
-                suggested_chunk_types=strategy["chunk_types"],
-                suggested_top_k=strategy["top_k"],
-                reasoning=f"Hybrid retrieval - {query_type.value}",
+                suggested_chunk_types=BROAD_RETRIEVAL["chunk_types"],
+                suggested_top_k=BROAD_RETRIEVAL["top_k"],
+                reasoning=f"Broad retrieval - {query_type.value} (shaping only)",
             )
 
         logger.info(f"Query classified as: {query_type.value}")
@@ -783,13 +791,19 @@ class QueryEngine:
         # End query processing timing (steps 1-4)
         timing_query_processing_ms = (time.perf_counter() - timing_query_processing_start) * 1000
 
-        # Step 5: Get retrieval strategy
-        strategy = RETRIEVAL_STRATEGIES[query_type]
-        chunk_types = strategy["chunk_types"]
-        strategy_top_k = strategy["top_k"]
-        rerank_top_n = strategy["rerank_top_n"]
-        max_per_paper = strategy.get("max_per_paper", 3)
-        section_filter = strategy.get("section_filter")
+        # Step 5: Retrieval parameters.
+        #
+        # One broad path (§4b, measured in W5): no chunk_type or section
+        # exclusions, because those are applied *before* scoring and make a
+        # correct answer invisible rather than low-ranked. `query_type` survives
+        # only as post-retrieval shaping — how many results to return and how
+        # many per paper — which cannot hide anything.
+        chunk_types = BROAD_RETRIEVAL["chunk_types"]
+        section_filter = BROAD_RETRIEVAL["section_filter"]
+        strategy_top_k = BROAD_RETRIEVAL["top_k"]
+        shape = RESPONSE_SHAPE.get(query_type, BROAD_RETRIEVAL)
+        rerank_top_n = shape.get("rerank_top_n", BROAD_RETRIEVAL["rerank_top_n"])
+        max_per_paper = shape.get("max_per_paper", BROAD_RETRIEVAL["max_per_paper"])
 
         # User-specified top_k controls the FINAL output count (rerank_top_n), not retrieval
         # Retrieval should cast a wider net to ensure good reranking candidates
@@ -832,7 +846,8 @@ class QueryEngine:
         results = None
         if self.cache:
             results = self.cache.get_search_results(
-                expanded_query, chunk_types, section_filter
+                expanded_query, chunk_types, section_filter,
+                paper_ids=paper_ids, top_k=effective_top_k,
             )
             if results:
                 cache_hit = True
@@ -889,7 +904,8 @@ class QueryEngine:
             # Cache search results
             if self.cache and results:
                 self.cache.set_search_results(
-                    expanded_query, results, chunk_types, section_filter
+                    expanded_query, results, chunk_types, section_filter,
+                    paper_ids=paper_ids, top_k=effective_top_k,
                 )
 
         retrieval_count = len(results) if results else 0

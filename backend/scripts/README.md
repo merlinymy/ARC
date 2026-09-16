@@ -168,3 +168,56 @@ The script handles errors gracefully:
 **Many "No metadata improvements available"**:
 - This means your papers already have good metadata!
 - The script only updates when it can improve quality
+
+---
+
+## Staged reindex — extract, then embed (plan §3b.10)
+
+`stage_lib.py`, `extract_stage.py`, `embed_stage.py`, `cohort_cited_papers.py`,
+`stage_reuse_check.py`. Driven through `index_papers.py <stage>`, which is now a
+dispatcher rather than a 543-line script that did four things.
+
+The reindex is two stages with different economics, and they are kept separable
+on purpose:
+
+| stage | cost | repeatable |
+|---|---|---|
+| `extract` — PDF → `processed_data/{id}.json` + figure crops | ~74 s/paper, $0, GPU-bound | expensive |
+| `embed` — record → chunks → vectors → Qdrant | ~1 s/paper + API | **free to redo** |
+
+```bash
+# 1. derive the cohort (the papers ARC has actually cited)
+python index_papers.py cohort --expect 591
+
+# 2. see what each stage would do; nothing is written
+python index_papers.py plan --papers-from data/cohorts/cited_papers.txt
+
+# 3. stage 1 — safe to interrupt and re-run, finished papers are skipped
+python index_papers.py extract --papers-from data/cohorts/cited_papers.txt
+
+# 4. stage 2 — builds the collection the active embedding profile names
+python index_papers.py embed --papers-from data/cohorts/cited_papers.txt
+
+# later: the rest of the corpus, without re-touching the cohort
+python index_papers.py extract --pending
+```
+
+Properties worth knowing:
+
+- **Record reuse.** A record is skipped when its `schema_version`,
+  `extractor_version`, `file_size` and `file_mtime` still describe the PDF. A
+  moved `mtime` with an identical size is reused (copying a volume is not a
+  content change) — verified against the PDF's sha256 when the manifest has one.
+  `--mtime-policy strict` re-extracts instead. `stage_reuse_check.py` asserts
+  both directions.
+- **Its own manifests.** `data/stage_manifests/extract.json` and
+  `embed__<collection>.json`: append-only `.jsonl` journal per paper plus an
+  atomic snapshot, so a `kill -9` cannot truncate them.
+  `data/indexing_checkpoint.json` is never read or written by these stages.
+- **The live index keeps serving.** The embed stage refuses a collection that
+  already holds points unless `--append`, and refuses a collection belonging to
+  a different embedding profile at all. Build beside the live one; cut over by
+  switching `EMBEDDING_PROFILE`.
+- **BM25.** The IDF cache is loaded read-only and never written; document sparse
+  vectors carry no corpus statistics. Refresh after the cutover with
+  `rebuild_bm25_index.py pass1`.

@@ -148,13 +148,80 @@ Set `citations: {"enabled": true}` on each `document` content block (all blocks 
 
 Keep the full-PDF path (`enable_pdf_upload`) as-is but turn citations on there too — it returns `page_location` natively, which is exactly the "p. 7" the user asked for.
 
-### 3b.2 Contextual retrieval, cheaply — ~$50–100 one-time
+### 3b.2 Contextual retrieval — **SUPERSEDED, DO NOT RUN** (decided 2026-09-16)
+
+> Replaced by `voyage-context-4` (§3b.8). The Haiku pass described below was designed and validated in W2 but **must not be executed** — contextualized chunk embeddings do the same job at the embedding layer, measurably better and for less money. `preprocessing/contextualizer.py` is to be deleted rather than wired in. The original design is kept below only as the record of what was compared.
+
+#### Original design (not executed)
 
 Prepend a short LLM-written context line to each chunk before embedding. 2026 benchmarks put the gains specifically on **numerical** queries, which is the user's strongest use case.
 
 The naive per-chunk implementation is expensive. The efficient design is **one Haiku call per paper** that emits a context line for every chunk in that paper at once: ~10k input tokens (the paper) + ~1.2k output. At Haiku 4.5 rates that is ≈$0.02/paper, so **≈$96 for all 4,797 papers — ≈$48 via the Batch API (50% off)**. Prompt caching (512-token minimum on Opus 5, reads at 0.1×) makes the per-chunk variant viable too, but one-call-per-paper is cheaper and simpler.
 
 Do this during the single W1+W2 reindex, after the paper record is persisted. Keep the deterministic `[Title — Section > Subsection, p.N]` header as well; the two are complementary.
+
+### 3b.8 `voyage-context-4` — contextualized chunk embeddings (decided 2026-09-16)
+
+Released 2026-06-29, after this plan's SOTA review and after the model's training cutoff. Produces **document-aware vectors per chunk**: pass a paper's chunks nested together and each embedding is computed with full document context. That is exactly what §3b.2's Haiku pass was for, done natively.
+
+**Cheaper and better at once**, against the measured 104,322,997 corpus embed tokens:
+
+| | plan as written | with `voyage-context-4` |
+|---|---:|---:|
+| embeddings | $6.26 (`voyage-3-large` @ $0.06/1M) | **$12.52** (@ $0.12/1M) |
+| Haiku contextual pass | $47.00 (Batch) | **$0** — not needed |
+| **total** | **$53.26** | **$12.52** |
+
+Quality: `voyage-context-3` beat Anthropic contextual retrieval by **6.76%** on chunk-level retrieval and Jina late chunking by 23.66%; `context-4` adds ~2.08% on top. That also settles late chunking, which was the other option under consideration.
+
+**Verified live 2026-09-16** on this account: model reachable, `voyageai 0.3.7` already exposes `contextualized_embed`, 1024 dimensions (matching the existing collection), one vector returned per supplied chunk.
+
+Two hard constraints:
+
+- **Do not use `enable_auto_chunking`.** It would discard W1/W2's structure-aware boundaries and the char offsets the Citations API depends on. Pass our own chunks as nested lists with auto-chunking off.
+- **Per-document context window is 32K tokens, and ~10% of papers exceed it** (measured: 4/40 sample papers, max 58,235). Those must be grouped per section rather than per paper, accepting reduced cross-document context on the longest reviews.
+
+Keep the deterministic `[Title — Section > Subsection, p.N]` header: contextualized embeddings improve the dense vector, but BM25 still reads `embed_text`, and the header is free.
+
+### 3b.9 Figures — navigate, don't read (decided 2026-09-16)
+
+Model-based figure understanding was **considered and rejected**, not deferred. The user reads their own spectra better than a model does, and a misread axis value indexed *with a citation attached* is worse than no value — it undermines the number-extraction capability they value most. Cost avoided: $78 (Haiku) to $391 (Opus 5) for 38,016 figures.
+
+The insight that makes this work: **retrieval and comprehension are separable.** Captions are substantive enough to find the right figure (measured: mean 324 chars, median 240, 54% over 200), and the human supplies the understanding.
+
+What gets built instead:
+
+1. **Persist figure and table crops durably.** MinerU writes them to a `TemporaryDirectory` that dies with the subprocess, so `img_path` in every existing record is dangling. This is a prerequisite, not insurance: rendering a figure in chat needs the bytes, and recovering them later would mean a second full extraction.
+2. **Serve and render figures inline** so the user can look without leaving the conversation.
+3. **Click-to-figure from a cited caption** — the reliable path: 317/317 sample figures carry a bbox and page.
+4. **In-text reference resolver** — 806 references across 40 papers, 74.9% resolved by naive regex. **Unresolved references must render as plain text**; a dead link is an invisible failure. These are the same mentions the old regex turned into 93k junk chunks (R2) — useful as links, poison as retrievable text.
+
+Known and accepted gap: data existing *only* inside a figure, absent from caption, body and tables, becomes unfindable by value.
+
+### 3b.10 Migration mechanics — staged, incremental extraction (decided 2026-09-16)
+
+The plan assumed one reindex. It is actually **two stages with wildly different economics**, and conflating them is what makes the current tooling unusable:
+
+| stage | time | money | repeatable? |
+|---|---|---|---|
+| extract → paper records | ~98 h (all) / ~12 h (591) | $0 | expensive |
+| chunk → embed → upsert | 3 min + ~2-4 h embed | ~$12.52 | **free to redo** |
+
+Neither existing path can run the incremental plan:
+
+- `index_papers.py` resumes from a checkpoint claiming **4,792 papers already indexed** (from the *old* pipeline) → extracts nothing.
+- `index_papers.py --reset` clears the checkpoint **and the live collection** → all 4,797, 98 h, no incremental option.
+
+And `pdf_processor.py` has no record-reuse check, so re-running re-extracts papers that already have a valid record.
+
+Four additions required before any extraction run:
+
+1. **Skip extraction when a valid record exists** — compare `schema_version`, `extractor_version`, `file_size` and `file_mtime`, all of which W1 already stores. Makes extraction idempotent: run 591 today, all 4,797 later, and only the 4,206 new ones are processed.
+2. **Paper selection** (`--papers-from <list>`) to target a cohort.
+3. **Split the checkpoint by stage.** "Indexed" currently means both extracted and embedded; those are now separate, and one flag cannot mean both. Leave `indexing_checkpoint.json` untouched and give the new stages their own manifests — the same non-destructive approach used for the `temperature`/`effort` columns.
+4. **Build into a new collection** rather than `--reset`, so the live index keeps serving and the cutover is a swap.
+
+**First cohort: the 591 papers ARC has actually cited** (590 resolve to files on disk; one has gone missing). ~12 h, ~$2, measurable against W5's baseline before committing the remaining 4,206.
 
 ### 3b.3 Prompt caching — currently zero, and about to matter a lot
 

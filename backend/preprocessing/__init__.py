@@ -12,6 +12,7 @@ from .chunker import PaperChunker
 from . import numeric_facts
 from .pdf_processor import PDFProcessor, EnhancedPDFProcessor, PDFChunk
 from . import paper_record
+from . import figure_refs
 
 __all__ = [
     # Models
@@ -28,6 +29,8 @@ __all__ = [
     "numeric_facts",
     # The paper record (W1) -- structured extraction persisted per paper
     "paper_record",
+    # Figure/table labels and in-text reference resolution
+    "figure_refs",
     # PDF Processing
     "PDFProcessor",
     "EnhancedPDFProcessor",

@@ -42,6 +42,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import tiktoken
 
+from . import figure_refs as fx
 from . import numeric_facts as nf
 from . import paper_record as pr
 from .models import Chunk, ChunkType, PaperMetadata
@@ -368,8 +369,15 @@ class PaperChunker:
         doc = pr.full_text(record)
         chunks: List[Chunk] = []
 
+        # One label index per paper, shared by the caption/table chunks (which
+        # carry their own object's label) and the body chunks (which carry the
+        # objects they point at). Built once: it is a full pass over the
+        # captions, and re-deriving it per chunk would be quadratic.
+        fx.label_record_objects(record)
+        fig_index = fx.label_index(record)
+
         chunks.extend(self._abstract_chunks(record, doc, meta))
-        chunks.extend(self._section_and_fine_chunks(record, doc, meta))
+        chunks.extend(self._section_and_fine_chunks(record, doc, meta, fig_index))
         # A table chunk's span already contains its caption verbatim, so a
         # standalone caption chunk for it would index the same text twice.
         # Figure captions have no such chunk and always stand alone.
@@ -431,6 +439,12 @@ class PaperChunker:
         subsection_name: Optional[str] = None,
         parent_chunk_id: Optional[str] = None,
         figure_id: Optional[str] = None,
+        figure_kind: Optional[str] = None,
+        figure_label: Optional[str] = None,
+        figure_page: Optional[int] = None,
+        figure_bbox: Optional[List[int]] = None,
+        figure_image: Optional[str] = None,
+        figure_refs: Optional[List[Dict[str, Any]]] = None,
         embed_body: Optional[str] = None,
         display_body: Optional[str] = None,
         numeric_source: Optional[str] = None,
@@ -474,6 +488,12 @@ class PaperChunker:
             subsection_name=subsection_name,
             parent_chunk_id=parent_chunk_id,
             figure_id=figure_id,
+            figure_kind=figure_kind,
+            figure_label=figure_label,
+            figure_page=figure_page,
+            figure_bbox=figure_bbox,
+            figure_image=figure_image,
+            figure_refs=figure_refs or [],
             title=meta.title,
             authors=meta.authors,
             year=meta.year,
@@ -551,7 +571,7 @@ class PaperChunker:
             "synthetic": True,
         }]
 
-    def _section_and_fine_chunks(self, record, doc, meta) -> List[Chunk]:
+    def _section_and_fine_chunks(self, record, doc, meta, fig_index=None) -> List[Chunk]:
         blocks = record["blocks"]
         chunks: List[Chunk] = []
         fine_idx = 0
@@ -630,22 +650,51 @@ class PaperChunker:
                     section_label=section_label,
                     subsection_name=subsection,
                     parent_chunk_id=section_chunk.chunk_id if section_chunk else None,
+                    # "as shown in Figure 3" inside this chunk, resolved to the
+                    # figure. R2's mistake was indexing these mentions as
+                    # caption chunks; they are links on the chunk that contains
+                    # them, and they change no text.
+                    figure_refs=fx.refs_for_span(
+                        record, doc[span["char_start"]:span["char_end"]],
+                        index=fig_index),
                     embed_body=clean,
                     display_body=clean,
                 ))
                 fine_idx += 1
         return chunks
 
+    @staticmethod
+    def _objects_by_caption_block(record) -> Dict[int, Dict[str, Any]]:
+        """``{caption block index: the figure/table it captions}``.
+
+        The caption -> object link has to come from the record's own
+        ``caption_blocks`` lists.  The previous version numbered captions
+        ``figure_{n}`` off their position in ``record["caption_blocks"]``, which
+        is the *caption* ordinal, not the figure's: a figure with a two-block
+        caption shifted every later id by one, so ``figure_5`` could name the
+        fourth figure.  Now that the id is an addressable handle -- a URL path
+        component and a jump target -- that would have been a wrong link rather
+        than a cosmetic mislabel.
+        """
+        out: Dict[int, Dict[str, Any]] = {}
+        for group in ("figures", "tables"):
+            for entry in record.get(group) or []:
+                for i in entry.get("caption_blocks", []):
+                    out[i] = entry
+        return out
+
     def _caption_chunks(self, record, doc, meta, skip_blocks=frozenset()) -> List[Chunk]:
         blocks = record["blocks"]
         sections = {s["id"]: s for s in (record.get("sections") or [])}
+        owners = self._objects_by_caption_block(record)
         chunks: List[Chunk] = []
         for n, block_i in enumerate(record.get("caption_blocks") or []):
             block = blocks[block_i]
             if block_i in skip_blocks or len(block["text"]) < 20:
                 continue
             section = sections.get(block.get("section_id"))
-            kind = block.get("kind") or "figure"
+            owner = owners.get(block_i) or {}
+            kind = owner.get("kind") or block.get("kind") or "figure"
             chunks.append(self._make(
                 f"{meta.paper_id}_caption_{n}",
                 ChunkType.CAPTION,
@@ -660,9 +709,36 @@ class PaperChunker:
                 # section name here.
                 section_name=section["normalized_name"] if section else None,
                 section_label=section.get("name") if section else None,
-                figure_id=f"{kind}_{n}",
+                **self._figure_meta(owner, fallback_id=f"{kind}_{n}"),
             ))
         return chunks
+
+    @staticmethod
+    def _figure_meta(entry: Dict[str, Any],
+                     fallback_id: Optional[str] = None) -> Dict[str, Any]:
+        """The figure-navigation payload for a caption or table chunk.
+
+        Carries **the figure's** page and rectangle, which is the point: when
+        ARC cites a caption, the jump has to land on the picture, not on the
+        line of text underneath it.  ``page_start``/``bbox`` on the chunk stay
+        describing the span ``text`` was sliced from -- two different questions,
+        two different fields, and neither one lying about the other.
+
+        Preferring ``image_bbox`` over ``bbox`` is what makes "lands on the
+        image" literal: MinerU's ``content_list`` bbox is the figure *group*
+        (picture + caption), while ``image_bbox`` is the picture itself.
+        """
+        if not entry:
+            return {"figure_id": fallback_id}
+        page_idx = entry.get("page_idx")
+        return {
+            "figure_id": entry.get("figure_id") or fallback_id,
+            "figure_kind": entry.get("kind"),
+            "figure_label": entry.get("label"),
+            "figure_page": None if page_idx is None else page_idx + 1,
+            "figure_bbox": entry.get("image_bbox") or entry.get("bbox"),
+            "figure_image": entry.get("img_path"),
+        }
 
     def _table_chunks(self, record, doc, meta) -> Tuple[List[Chunk], set]:
         """Table chunks, plus the caption blocks their spans already cover."""
@@ -703,7 +779,7 @@ class PaperChunker:
                 block_end=span_blocks[-1]["i"] + 1,
                 section_name=section["normalized_name"] if section else None,
                 section_label=section.get("name") if section else None,
-                figure_id=f"table_{n}",
+                **self._figure_meta(table, fallback_id=f"table_{n}"),
                 # HTML tags are noise to an embedding model and to BM25; the cell
                 # values are the signal.  `text` keeps the verbatim HTML.
                 embed_body=readable or None,

@@ -113,8 +113,30 @@ class Chunk:
     section_name: Optional[str] = None  # Parent section: "methods", "results", etc.
     subsection_name: Optional[str] = None  # Subsection header if applicable
     parent_chunk_id: Optional[str] = None
-    figure_id: Optional[str] = None
     page_numbers: List[int] = field(default_factory=list)  # 1-indexed, inclusive
+
+    # --- the figure this chunk *is* (caption / table chunks) ---------------
+    #: ``figure_3`` / ``table_1`` -- the record's handle for the object, and the
+    #: path component of ``GET /papers/{paper_id}/figures/{figure_id}``.
+    figure_id: Optional[str] = None
+    figure_kind: Optional[str] = None      # "figure" | "table"
+    figure_label: Optional[str] = None     # "Figure 3", "Table II"
+    #: **The figure's** page and rectangle, not the caption's.  A caption chunk's
+    #: own ``page_start``/``bbox`` describe the span its ``text`` was sliced
+    #: from; these describe where the *picture* is, which is what a
+    #: click-to-figure jump has to land on.  Metadata only -- never in ``text``.
+    figure_page: Optional[int] = None      # 1-indexed
+    figure_bbox: Optional[List[int]] = None
+    #: Record-relative crop reference, ``figures/<sha256>.jpg``, or None when
+    #: MinerU wrote no crop.  Resolve with ``paper_record.asset_path``.
+    figure_image: Optional[str] = None
+
+    # --- figures this chunk *mentions* (body chunks) -----------------------
+    #: Resolved in-text references, offsets **relative to this chunk's text**:
+    #: ``[{"start", "end", "text", "figure_id", "label", "page", "inferred"}]``.
+    #: Unresolved mentions are absent by construction, so every entry here is a
+    #: live link and anything missing renders as ordinary prose (no dead links).
+    figure_refs: List[Dict[str, Any]] = field(default_factory=list)
 
     # Paper-level metadata (denormalized for retrieval)
     title: str = ""
@@ -184,7 +206,15 @@ class Chunk:
             "section_name": self.section_name,
             "subsection_name": self.subsection_name,
             "parent_chunk_id": self.parent_chunk_id,
+            # --- figure identity and navigation ---
             "figure_id": self.figure_id,
+            "figure_kind": self.figure_kind,
+            "figure_label": self.figure_label,
+            "figure_page": self.figure_page,
+            "figure_bbox": self.figure_bbox,
+            "figure_image": self.figure_image,
+            "figure_refs": self.figure_refs,
+            "has_figure_image": bool(self.figure_image),
             "title": self.title,
             "authors": self.authors,
             "year": self.year,
